@@ -55,12 +55,23 @@ platform and a `frps` (fatedier/frp) reverse-proxy server.
   `vhost_https_port = 9967`. Firewall rules `frps-7000-tcp` and
   `frps-9966-9967-tcp` open exactly these ports (point rules by port, same
   style as the existing `CMSv6-*` rules).
-- Dashboard binds to **127.0.0.1:7500 only** — never opened in the firewall.
-  Reach it through an SSH tunnel:
+- Dashboard binds to **`0.0.0.0:7500`** and is currently reachable from the
+  internet — TEMPORARY, opened 2026-07-30 for testing at Максим's request via
+  firewall rule `frps-7500-tcp-temp` (the `-temp` suffix marks it for removal
+  after testing; not one of the permanent `frps-*` rules). The dashboard
+  itself is plain HTTP, no TLS — basic auth (`admin` + `dashboard_pwd`) goes
+  over the wire in cleartext while this rule is open. Don't reuse the
+  dashboard password anywhere else while it's exposed this way.
+  The normal, permanent way to reach the dashboard is still an SSH tunnel —
+  use it whenever the temporary firewall rule isn't (or shouldn't be) open:
   ```bash
   sshpass -p "$PASSWORD" ssh -p 2299 -L 7500:127.0.0.1:7500 "$LOGIN@$SERVER"
   ```
   then open `http://127.0.0.1:7500`, user `admin`.
+  **To close it back up** once testing is done: delete the firewall rule
+  (`Remove-NetFirewallRule -DisplayName "frps-7500-tcp-temp"`), set
+  `dashboard_addr = 127.0.0.1` back in `frps.ini`, then restart the `frps`
+  scheduled task (`Stop-ScheduledTask` → `Start-ScheduledTask`).
 - `token` and the dashboard password (`dashboard_pwd`) are generated values
   that live only in `frps.ini` on the server — not in this repo, not in PRs,
   not in chat or logs. Anyone configuring an `frpc` client reads them by SSH.
