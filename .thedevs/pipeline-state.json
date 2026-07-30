@@ -1,1 +1,0 @@
-{"domain":"common","specPath":"specs/2026-07-30-iprsv1-win-frps-server.md","specId":"2026-07-30-iprsv1-win-frps-server","pipeline":["implement","postimpl","checkpoint","pr"],"phases_before_push":["implement"],"router":"impl","branch":"impl/2026-07-30-iprsv1-win-frps-server"}
