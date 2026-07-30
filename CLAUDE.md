@@ -88,12 +88,45 @@ platform and a `frps` (fatedier/frp) reverse-proxy server.
   (`C:/Users/Administrator/Desktop/6e9/frps.log`) — a backslash path breaks
   the vendor logger's config parsing (`\U` in `Users` is read as an invalid
   escape sequence) and frps exits immediately without writing a log line.
-- `subdomain_host` is intentionally not set — the project has no domain yet.
-  Until it's set, frps rejects any `subdomain`-based http/https proxy with
-  "subdomain is not supported because this feature is not enabled by frps";
-  that is expected, not a bug. To enable it later: point a wildcard A record
-  at the address in `SERVER`, add `subdomain_host = <domain>` to `frps.ini`,
-  then restart the `frps` scheduled task.
+- `subdomain_host = scanvision.online` is set in `frps.ini` (added 2026-07-30,
+  IPRSV1-7). The zone's NS is `ns1.reg.ru`/`ns2.reg.ru`; apex `scanvision.online`
+  and `www.scanvision.online` both resolve to the address in `SERVER`. A
+  wildcard `*` A record in that zone is a hard requirement for the
+  `subdomain`-proxy mechanism to work — frps hands an `frpc` client a hostname
+  of the form `<name>.scanvision.online`, and without the wildcard record that
+  hostname resolves nowhere. As of 2026-07-30 the wildcard record does **not**
+  exist in the zone (confirmed by querying an arbitrary third-level name —
+  NXDOMAIN); registrar (reg.ru) credentials aren't held in this repo, so
+  someone with reg.ru access needs to add an `A` record, name `*`, value the
+  `SERVER` address, in the `scanvision.online` zone. A backup of the
+  pre-change config is kept as `frps.ini.bak-2026-07-30` next to `frps.ini`.
+- **CMSV6 client linkage.** The vendor connects an `frpc` client (installed by
+  the operator, package `CMSV6_WIN_*.exe`, into
+  `...\Program Files (x86)\CMSV6\plugin\config\libconfig_<FactoryType>\`) to
+  this frps server via a file named `frpcSet.xml` in that same directory:
+  ```xml
+  <FRPC version="1.0.0">
+    <ServerIp>www.scanvision.online</ServerIp>
+    <ServerPort>7000</ServerPort>
+    <TokenForCon>{значение token из frps.ini}</TokenForCon>
+    <ViewPort>9966</ViewPort>
+    <isOpenFunc>1</isOpenFunc>
+  </FRPC>
+  ```
+  `ServerPort` is `bind_port`, `ViewPort` is `vhost_http_port` (9966).
+  `TokenForCon` is the `token` value from `frps.ini` on this server — read it
+  over SSH when configuring a client, never write the actual value here or
+  anywhere else outside `frps.ini`. This file and the CMSV6 client that reads
+  it live on the operator's machine, not on this server: there is no `D:` drive
+  here, no `Program Files (x86)\CMSV6`, and no `libconfig_*`/`frpcSet.xml`
+  anywhere on disk — the server only runs the CMSV6 *server* component
+  (`C:\Program Files\CMSServerV6`, see above).
+- Restarting frps is done **only** through the `frps` scheduled task
+  (`Stop-ScheduledTask -TaskName 'frps'`, wait for the `frps.exe` process to
+  disappear, then `Start-ScheduledTask -TaskName 'frps'`). Running
+  `frps.exe -c frps.ini` directly from an SSH session starts a second,
+  competing instance that fights the first for port 7000 and dies the moment
+  the SSH session closes — always go through the scheduled task.
 
 ## Secrets
 
