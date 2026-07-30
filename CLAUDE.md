@@ -15,13 +15,21 @@ platform and a `frps` (fatedier/frp) reverse-proxy server.
   sshpass -p "$PASSWORD" ssh -p 2299 -o StrictHostKeyChecking=accept-new "$LOGIN@$SERVER"
   ```
 - The default shell is `cmd`. For anything beyond a single simple command, run
-  PowerShell and feed it a script on stdin — inline multi-line PowerShell
-  passed as a single quoted argument breaks on quoting:
+  PowerShell. Do NOT pipe a multi-line script to `powershell -Command -` on
+  stdin: it silently stops at the first `foreach`/`if`/`try` block that spans
+  more than one line — everything after that block never runs, with no error
+  and exit code 0 (verified: a 4-line script with a multi-line `foreach {}`
+  printed only the first line). Use `-EncodedCommand` with base64-encoded
+  UTF-16LE instead — verified to run multi-line blocks correctly:
   ```bash
-  ssh -p 2299 "$LOGIN@$SERVER" 'powershell -NoProfile -NonInteractive -Command -' <<'PS'
-  ... multi-line PowerShell ...
-  PS
+  SCRIPT='Write-Output "line1"
+  foreach ($i in 1..2) { Write-Output "inside-$i" }
+  Write-Output "line-after-block"'
+  ENC=$(printf '%s' "$SCRIPT" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
+  sshpass -p "$PASSWORD" ssh -p 2299 "$LOGIN@$SERVER" "powershell -NoProfile -NonInteractive -EncodedCommand $ENC"
   ```
+  (If a script truly has no multi-line blocks — every `{ }` on one line — the
+  stdin form works too, but `-EncodedCommand` is the safe default.)
 - A process started interactively over SSH is killed when the SSH session
   closes (OpenSSH ties the process to the session's job object). Anything that
   needs to keep running independently must go through Windows Task Scheduler
@@ -50,7 +58,7 @@ platform and a `frps` (fatedier/frp) reverse-proxy server.
 - Dashboard binds to **127.0.0.1:7500 only** — never opened in the firewall.
   Reach it through an SSH tunnel:
   ```bash
-  ssh -p 2299 -L 7500:127.0.0.1:7500 "$LOGIN@$SERVER"
+  sshpass -p "$PASSWORD" ssh -p 2299 -L 7500:127.0.0.1:7500 "$LOGIN@$SERVER"
   ```
   then open `http://127.0.0.1:7500`, user `admin`.
 - `token` and the dashboard password (`dashboard_pwd`) are generated values
