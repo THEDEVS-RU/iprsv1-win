@@ -154,8 +154,9 @@ externally as a fallback entry point; it is not closed by this setup.
     C:/nginx/ssl/scanvision.online-key.pem`, `ssl_protocols TLSv1.2 TLSv1.3`.
   - Both blocks set `Host`/`X-Real-IP`/`X-Forwarded-For`/`X-Forwarded-Proto`
     and `Upgrade`/`Connection` (via a `map $http_upgrade $connection_upgrade`)
-    for CMSV6's websockets, `proxy_buffering off`, 3600s timeouts,
-    `client_max_body_size 1024m`.
+    for CMSV6's websockets, `proxy_buffering off`, 3600s timeouts.
+    `client_max_body_size 1024m` is set once at `http` level (inherited by
+    both server blocks, not repeated per block).
   - No `Strict-Transport-Security` header and no redirect from 80 to 443 —
     deliberate: HSTS would force browsers to refuse the plain-HTTP entry point,
     and 80 is meant to keep working as a normal, first-class way in (not just
@@ -178,6 +179,14 @@ externally as a fallback entry point; it is not closed by this setup.
     renewal: its own scheduled task also runs as `SYSTEM`, so the post-install
     script it calls (`C:\nginx\reload-nginx.bat`: `cd /d C:\nginx` +
     `nginx.exe -s reload`) runs in the same account as nginx and succeeds.
+  - **Working-directory gotcha:** `nginx.exe -t` (or `-s reload`) run from an
+    SSH session's default directory fails on relative paths — nginx resolves
+    `conf`/`logs` relative to its own working directory, not its exe location
+    — e.g. `nginx: [alert] could not open error log file: CreateFile()
+    "logs/error.log" failed` and `CreateFile()
+    "C:\Users\Administrator/conf/nginx.conf" failed`. Always run either from
+    `C:\nginx` (`cd C:\nginx` first) or with explicit `-p`/`-c`:
+    `nginx.exe -p C:\nginx -c conf\nginx.conf -t`.
 - **win-acme** — `C:\win-acme` (win-acme 2.2.9.1701, `wacs.exe`). Issued the
   certificate with:
   ```
@@ -195,29 +204,46 @@ externally as a fallback entry point; it is not closed by this setup.
   (leaf only) and `-chain-only.pem` (CA chain only) which nginx doesn't use.
   Renewal runs automatically via scheduled task **`win-acme renew
   (acme-v02.api.letsencrypt.org)`** (`SYSTEM`, next due 2026-09-23) — no
-  manual action needed under normal operation. Manual/forced renewal, if ever
-  needed: `C:\win-acme\wacs.exe --renew --force` — but Let's Encrypt limits
-  duplicate-certificate issuance for the same name set to 5 per rolling week,
-  so don't run this more than once in quick succession; a forced run was
-  already exercised once (2026-07-30) via a temporary SYSTEM-context
-  scheduled task (interactive SSH runs as `Administrator`, which would hit
-  the same reload gotcha as above) and completed cleanly — files refreshed,
-  no errors, nginx reloaded successfully.
+  manual action needed under normal operation. `--renew --force` ignores the
+  due date but does **not** bypass win-acme's own cache — a cached order/pfx
+  from the last issuance is reused for about a day afterwards ("Using cache
+  for scanvision.online... Order 1/1 (Main): handle from cache" in
+  `C:\ProgramData\win-acme\<baseuri>\Log\`), so running `--force` shortly
+  after an issuance just re-applies the same certificate (store + install
+  hooks run, no new ACME order or http-01 validation happens). To force a
+  genuinely new certificate, add `--nocache` — and that's specifically what
+  the weekly Let's Encrypt duplicate-certificate limit (5 per name set per
+  rolling week) applies to; a bare `--force` right after issuance doesn't
+  count against it. What actually happened 2026-07-30: a `--renew --force`
+  run at 20:49 (about 30 minutes after the initial issuance at ~20:22) hit
+  the cache — pem files in `C:\nginx\ssl` were rewritten and nginx reloaded
+  cleanly via a temporary SYSTEM-context scheduled task (interactive SSH
+  runs as `Administrator`, which would hit the reload gotcha above), but no
+  new certificate was issued and the end-to-end ACME/http-01 cycle itself was
+  only exercised once, by the original issuance.
 - **Proxy behavior verified from real traffic**, not just synthetic checks:
   `C:\nginx\logs\access.log` shows real clients successfully logging in
   through the proxy and CMSV6's main-interface websocket
   (`/ws/webSocket/index/1`, `/ws/webSocket/down/1`) returning `101` with no
   `400`/`502` from the proxy path. That socket builds its URL from
   `this.location.host`/`this.location.protocol` in the client JS, so it
-  follows whatever scheme the page was loaded with. Live video specifically
-  (the plugin/media-stream path) was not interactively re-verified in this
-  pass — no CMSV6 test account was available — but nothing observed suggests
-  it's broken, and the mixed-content risk noted in the original spec (a
-  hardcoded `ws://` in the video path) only bites under HTTPS, which isn't
-  externally reachable anyway right now (see below), so it isn't currently
-  something a real visitor can hit. Re-check specifically if HTTPS access is
-  ever restored. If video does turn out broken, `http://scanvision.online/`
-  and direct `http://<адрес из SERVER>:8080/` remain working fallback paths.
+  follows whatever scheme the page was loaded with. Live video specifically:
+  `access.log` (five days, 2026-07-31 → 2026-08-03, ~7k real requests) shows
+  the player's pages and scripts loading fine through the proxy — 200 on
+  `/808gps/ttxvideo/ttxvideo-h5.html`, `/808gps/open/player/video-replay.html`,
+  `ttxplayer-h5.js`, `cmsv6player.min.js`, `ttxvideoapi.js` — but the actual
+  video stream itself never goes through nginx: the only websocket upgrades
+  in that whole window are `/ws/webSocket/index/1` and
+  `/ws/webSocket/down/1` (the main interface socket); no `flv`/`m3u8`/`hls`/
+  `mp4` request and no other websocket path appears at all. So the video
+  stream bypasses the proxy entirely and goes straight to CMSV6's media port,
+  not through `scanvision.online`. That's consistent with the risk flagged in
+  the original spec (video URLs coming from the API as absolute
+  addresses/ports rather than relative to the page) — it isn't specifically
+  a mixed-content/HTTPS problem, since HTTPS isn't externally reachable
+  anyway (see below). `http://scanvision.online/` and direct
+  `http://<адрес из SERVER>:8080/` are both unaffected either way, since
+  neither depends on the video stream routing through nginx.
 
 ### Known limitation: HTTPS (443) not reachable from outside
 
