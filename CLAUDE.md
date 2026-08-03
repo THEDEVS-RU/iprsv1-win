@@ -45,6 +45,12 @@ platform and a `frps` (fatedier/frp) reverse-proxy server.
   their files, or change the `CMSv6-*` firewall rules.
 - **frps** — reverse-proxy server, `C:\Users\Administrator\Desktop\6e9`
   (`frps.exe`, `frps.ini`, `frps.log`).
+- **nginx** — reverse proxy in front of CMSV6's web UI, `C:\nginx` (nginx
+  1.30.4). Terminates HTTP on port 80 for `scanvision.online` and
+  `www.scanvision.online`; a 443 block also exists but HTTPS isn't reachable
+  from outside the machine (see below). **win-acme** — ACME client,
+  `C:\win-acme` (win-acme 2.2.9.1701), issues and renews the Let's Encrypt
+  certificate nginx uses.
 
 ## frps
 
@@ -127,6 +133,136 @@ platform and a `frps` (fatedier/frp) reverse-proxy server.
   `frps.exe -c frps.ini` directly from an SSH session starts a second,
   competing instance that fights the first for port 7000 and dies the moment
   the SSH session closes — always go through the scheduled task.
+
+## Web access via domain (nginx + win-acme)
+
+CMSV6's web UI (`gpstomcat6`, `127.0.0.1:8080`, no TLS of its own) is reachable
+directly by domain name — `http://scanvision.online/` and
+`http://www.scanvision.online/` — via an nginx reverse proxy, instead of
+requiring the server's IP and port 8080. Port 8080 itself stays open
+externally as a fallback entry point; it is not closed by this setup.
+
+- **nginx** — `C:\nginx` (nginx 1.30.4, downloaded from nginx.org; the
+  vendor-stated 1.28.x had already rolled to legacy by install time, so
+  current stable was used instead). Config at `C:\nginx\conf\nginx.conf`: two
+  `server` blocks for `scanvision.online www.scanvision.online`.
+  - `listen 80` — serves `/.well-known/acme-challenge/` from `C:/nginx/html`
+    (webroot for ACME HTTP-01 validation) and proxies everything else to
+    `http://127.0.0.1:8080`.
+  - `listen 443 ssl` — same proxy target, `ssl_certificate
+    C:/nginx/ssl/scanvision.online-chain.pem`, `ssl_certificate_key
+    C:/nginx/ssl/scanvision.online-key.pem`, `ssl_protocols TLSv1.2 TLSv1.3`.
+  - Both blocks set `Host`/`X-Real-IP`/`X-Forwarded-For`/`X-Forwarded-Proto`
+    and `Upgrade`/`Connection` (via a `map $http_upgrade $connection_upgrade`)
+    for CMSV6's websockets, `proxy_buffering off`, 3600s timeouts,
+    `client_max_body_size 1024m`.
+  - No `Strict-Transport-Security` header and no redirect from 80 to 443 —
+    deliberate: HSTS would force browsers to refuse the plain-HTTP entry point,
+    and 80 is meant to keep working as a normal, first-class way in (not just
+    an ACME-validation path), per Максим's decision.
+  - Runs via Windows Task Scheduler task **`nginx`** (same pattern as `frps`:
+    trigger at system startup, principal `SYSTEM`, RunLevel Highest, working
+    directory `C:\nginx`, restart on failure 3× at 1-minute intervals). Firewall
+    rules `nginx-80-tcp` and `nginx-443-tcp` (by port, same style as `CMSv6-*`
+    and `frps-*`) open the two ports.
+  - **Reload gotcha:** `nginx.exe -s reload` only works when run by the same
+    Windows account that started the nginx master process — it signals a
+    named Windows event (`Global\ngx_reload_<pid>`) scoped to that account.
+    Since the scheduled task runs nginx as `SYSTEM`, running `nginx.exe -s
+    reload` from an interactive SSH session (which runs as the login account,
+    e.g. `Administrator`) fails with `OpenEvent(...) failed (5: Access is
+    denied)` — verified. To apply a config change manually over SSH, restart
+    the scheduled task instead: `Stop-ScheduledTask -TaskName nginx` →
+    (wait for both `nginx.exe` processes to exit) → `Start-ScheduledTask
+    -TaskName nginx`. This gotcha does **not** affect win-acme's automatic
+    renewal: its own scheduled task also runs as `SYSTEM`, so the post-install
+    script it calls (`C:\nginx\reload-nginx.bat`: `cd /d C:\nginx` +
+    `nginx.exe -s reload`) runs in the same account as nginx and succeeds.
+- **win-acme** — `C:\win-acme` (win-acme 2.2.9.1701, `wacs.exe`). Issued the
+  certificate with:
+  ```
+  wacs.exe --source manual --host scanvision.online,www.scanvision.online ^
+    --friendlyname scanvision.online ^
+    --validation filesystem --webroot C:\nginx\html ^
+    --store pemfiles --pemfilespath C:\nginx\ssl ^
+    --installation script --script C:\nginx\reload-nginx.bat ^
+    --accepttos --emailaddress admin@scanvision.online
+  ```
+  Certificate (issuer `CN=YR1, O=Let's Encrypt, C=US`) covers both names,
+  valid 2026-07-30 → 2026-10-28. Files in `C:\nginx\ssl`:
+  `scanvision.online-chain.pem` (full chain, used as `ssl_certificate`),
+  `-key.pem` (private key, used as `ssl_certificate_key`), plus `-crt.pem`
+  (leaf only) and `-chain-only.pem` (CA chain only) which nginx doesn't use.
+  Renewal runs automatically via scheduled task **`win-acme renew
+  (acme-v02.api.letsencrypt.org)`** (`SYSTEM`, next due 2026-09-23) — no
+  manual action needed under normal operation. Manual/forced renewal, if ever
+  needed: `C:\win-acme\wacs.exe --renew --force` — but Let's Encrypt limits
+  duplicate-certificate issuance for the same name set to 5 per rolling week,
+  so don't run this more than once in quick succession; a forced run was
+  already exercised once (2026-07-30) via a temporary SYSTEM-context
+  scheduled task (interactive SSH runs as `Administrator`, which would hit
+  the same reload gotcha as above) and completed cleanly — files refreshed,
+  no errors, nginx reloaded successfully.
+- **Proxy behavior verified from real traffic**, not just synthetic checks:
+  `C:\nginx\logs\access.log` shows real clients successfully logging in
+  through the proxy and CMSV6's main-interface websocket
+  (`/ws/webSocket/index/1`, `/ws/webSocket/down/1`) returning `101` with no
+  `400`/`502` from the proxy path. That socket builds its URL from
+  `this.location.host`/`this.location.protocol` in the client JS, so it
+  follows whatever scheme the page was loaded with. Live video specifically
+  (the plugin/media-stream path) was not interactively re-verified in this
+  pass — no CMSV6 test account was available — but nothing observed suggests
+  it's broken, and the mixed-content risk noted in the original spec (a
+  hardcoded `ws://` in the video path) only bites under HTTPS, which isn't
+  externally reachable anyway right now (see below), so it isn't currently
+  something a real visitor can hit. Re-check specifically if HTTPS access is
+  ever restored. If video does turn out broken, `http://scanvision.online/`
+  and direct `http://<адрес из SERVER>:8080/` remain working fallback paths.
+
+### Known limitation: HTTPS (443) not reachable from outside
+
+The 443 listener, firewall rule, and certificate are all in place and correct
+on this machine, but external clients cannot complete a TLS handshake to
+`scanvision.online:443` — the connection hangs until timeout. This is **not**
+something wrong on this server; it was confirmed by direct measurement, not
+guessed:
+
+- a plain TCP connection to port 443 from outside completes normally;
+- a plain (non-TLS) HTTP request sent to port 443 from outside gets a real
+  `400 Bad Request` back from nginx — so data does flow both ways on that
+  port, just not when the payload is a TLS handshake;
+- a TLS handshake from outside to the *other* externally-open ports on this
+  same machine — 9966, 9967, 7500, 8080 — completes instantly; TLS traffic as
+  a class is not being stripped on the path;
+- from the machine itself, TLS to port 443 (via `127.0.0.1` and via its own
+  public address) completes in ~50ms with a valid response.
+
+Conclusion: something on the network path between the internet and this
+server — outside Windows, outside this machine entirely — is specifically
+dropping the combination "port 443 + TLS handshake". Where exactly is not
+distinguishable from the vantage points available (can't tell if the inbound
+ClientHello or the outbound ServerHello is the one being lost).
+
+This machine's hosting is **not Aliyun**, despite that being assumed when the
+task was first written: hostname `VDSWIN2K22`, network adapter is a generic
+Red Hat VirtIO device, and the Aliyun/AWS/Azure/GCP cloud metadata endpoints
+are all unreachable from the server. There is no cloud "security group" to
+open here. Максим added an allow rule for 443 in the hosting provider's own
+panel on 2026-07-30 — it did not change the observed behavior.
+
+Nothing further was done about this in-task — it needs a decision from
+Максим. The nginx 443 config, certificate, and firewall rule are all left in
+place and working; if the network-path filtering is ever lifted, HTTPS should
+start working immediately with no further changes, and just needs an external
+check to confirm. Two possible workarounds exist but were deliberately not
+implemented here (both need Максим's decision, and change the setup rather
+than just fix a bug):
+
+1. Serve TLS on one of the ports that measurably isn't filtered (9966, 9967,
+   7500, or 8080) instead of 443 — works, but the domain would need the port
+   in the URL.
+2. Put an external reverse proxy/CDN in front of the domain that terminates
+   TLS itself and talks to this server over plain port 80.
 
 ## Secrets
 
