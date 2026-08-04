@@ -40,15 +40,19 @@ platform and a `frps` (fatedier/frp) reverse-proxy server.
 - **CMSV6** — the video/GPS platform (`C:\Program Files\CMSServerV6`):
   services `GPSDaemon`, `GPSGatewaySvr`, `GPSMediaSvr`, `GPSLoginSvr`,
   `GPSUserSvr`, `GPSDownSvr`, `GPSStorageSvr`, `GPSDataProcSvr`,
-  `GPSGeocodeSvr`, `GPSFtpd`, web UI on `gpstomcat6` (port 8080), MySQL on
-  `GPSMysqld` (127.0.0.1:3311). Do not stop/restart these services, touch
-  their files, or change the `CMSv6-*` firewall rules.
+  `GPSGeocodeSvr`, `GPSFtpd`, web UI on `gpstomcat6` (port 80, since
+  04.08.2026 — see below), MySQL on `GPSMysqld` (127.0.0.1:3311). Do not
+  stop/restart these services, touch their files, or change the `CMSv6-*`
+  firewall rules — the one documented exception is `gpstomcat6`, restarted
+  to apply a `server.xml` port change (see below).
 - **frps** — reverse-proxy server, `C:\Users\Administrator\Desktop\6e9`
   (`frps.exe`, `frps.ini`, `frps.log`).
 - **nginx** — reverse proxy in front of CMSV6's web UI, `C:\nginx` (nginx
-  1.30.4). Terminates HTTP on port 80 for `scanvision.online` and
-  `www.scanvision.online`; a 443 block also exists but HTTPS isn't reachable
-  from outside the machine (see below). nginx's 443 block uses a purchased
+  1.30.4). Since 04.08.2026 nginx only terminates HTTPS on port 443 for
+  `scanvision.online` and `www.scanvision.online`, proxying to CMSV6 on
+  `127.0.0.1:80`; HTTP on port 80 is now served directly by CMSV6's own
+  tomcat, not by nginx (see below). HTTPS on 443 still isn't reachable from
+  outside the machine (see below). nginx's 443 block uses a purchased
   GlobalSign certificate, valid until 18.02.2027 (see below) — **replace it
   manually before then, or HTTPS silently stops working**. **win-acme** —
   ACME client, `C:\win-acme` (win-acme 2.2.9.1701); issued the original
@@ -137,40 +141,64 @@ platform and a `frps` (fatedier/frp) reverse-proxy server.
   competing instance that fights the first for port 7000 and dies the moment
   the SSH session closes — always go through the scheduled task.
 
-## Web access via domain (nginx + win-acme)
+## Web access via domain (nginx + port 80/443 split)
 
-CMSV6's web UI (`gpstomcat6`, `127.0.0.1:8080`, no TLS of its own) is reachable
-directly by domain name — `http://scanvision.online/` and
-`http://www.scanvision.online/` — via an nginx reverse proxy, instead of
-requiring the server's IP and port 8080. Port 8080 itself stays open
-externally as a fallback entry point; it is not closed by this setup.
+Since 04.08.2026 (IPRSV1-11), CMSV6's tomcat (`gpstomcat6`) listens on port
+80 itself and is reachable directly by domain name —
+`http://scanvision.online/` and `http://www.scanvision.online/` — with no
+nginx in front of it on that port. nginx sits only on 443, terminating TLS
+with the purchased GlobalSign certificate and proxying to CMSV6 at
+`http://127.0.0.1:80`. Port 8080, the previous entry point, no longer
+answers — the tomcat connector was moved from 8080 to 80, it does not listen
+on both at once.
+
+The connector lives in `tomcat\conf\server.xml` of whichever CMSV6 tree the
+`gpstomcat6` service actually starts from — as of 04.08.2026 that is
+`C:\Program Files\CMSServerV6old\` (check the service `PathName` before
+assuming this path is still current, CMSV6 reinstalls have moved it before).
+In that tree, `tomcat\conf\server.xml`'s `Http11Nio2Protocol` connector has
+`port="80"`; a vendor-provided reference copy, `tomcat\conf\server - 80.xml`,
+sits next to it and differs from the working `server.xml` by exactly that
+one `port` attribute — it documents the intended value, it is not swapped in
+directly.
+
+**Reinstall gotcha:** any CMSV6 update or reinstall overwrites `server.xml`
+from the vendor package and puts the connector back on port 8080 — after
+every such update, port 80 has to be set again in the fresh `server.xml`
+(above) and `gpstomcat6` restarted, or `http://scanvision.online/` stops
+answering even though nothing else on the machine changed. Firewall rule
+`nginx-80-tcp` stays enabled on port 80 as before — it was never
+nginx-specific, it just opens the port; the process behind it changed from
+nginx to CMSV6.
 
 - **nginx** — `C:\nginx` (nginx 1.30.4, downloaded from nginx.org; the
   vendor-stated 1.28.x had already rolled to legacy by install time, so
-  current stable was used instead). Config at `C:\nginx\conf\nginx.conf`: two
-  `server` blocks for `scanvision.online www.scanvision.online`.
-  - `listen 80` — serves `/.well-known/acme-challenge/` from `C:/nginx/html`
-    (webroot for ACME HTTP-01 validation) and proxies everything else to
-    `http://127.0.0.1:8080`.
-  - `listen 443 ssl` — same proxy target, `ssl_certificate
+  current stable was used instead). Config at `C:\nginx\conf\nginx.conf`:
+  since 04.08.2026 a single `server` block for `scanvision.online
+  www.scanvision.online`, `listen 443 ssl` — there is no `listen 80` block
+  anymore, CMSV6 answers port 80 directly (see above). The old ACME webroot
+  location (`/.well-known/acme-challenge/` from `C:/nginx/html`) was removed
+  along with it — no longer needed, Let's Encrypt renewal for this domain is
+  cancelled.
+  - `listen 443 ssl` proxies to `http://127.0.0.1:80` (CMSV6's tomcat, moved
+    off 8080 — see above), `ssl_certificate
     C:/nginx/ssl/scanvision.online-gs-chain.pem`, `ssl_certificate_key
     C:/nginx/ssl/scanvision.online-gs-key.pem` (купленный GlobalSign, see
     below — заменил Let's Encrypt 04.08.2026), `ssl_protocols TLSv1.2
     TLSv1.3`.
-  - Both blocks set `Host`/`X-Real-IP`/`X-Forwarded-For`/`X-Forwarded-Proto`
-    and `Upgrade`/`Connection` (via a `map $http_upgrade $connection_upgrade`)
+  - Sets `Host`/`X-Real-IP`/`X-Forwarded-For`/`X-Forwarded-Proto` and
+    `Upgrade`/`Connection` (via a `map $http_upgrade $connection_upgrade`)
     for CMSV6's websockets, `proxy_buffering off`, 3600s timeouts.
-    `client_max_body_size 1024m` is set once at `http` level (inherited by
-    both server blocks, not repeated per block).
-  - No `Strict-Transport-Security` header and no redirect from 80 to 443 —
-    deliberate: HSTS would force browsers to refuse the plain-HTTP entry point,
-    and 80 is meant to keep working as a normal, first-class way in (not just
-    an ACME-validation path), per Максим's decision.
+    `client_max_body_size 1024m` is set once at `http` level.
+  - No `Strict-Transport-Security` header and no redirect to 443 — still
+    deliberate: 80 is a normal, first-class way in (now served by CMSV6
+    itself rather than nginx), not something to force browsers off of.
   - Runs via Windows Task Scheduler task **`nginx`** (same pattern as `frps`:
     trigger at system startup, principal `SYSTEM`, RunLevel Highest, working
-    directory `C:\nginx`, restart on failure 3× at 1-minute intervals). Firewall
-    rules `nginx-80-tcp` and `nginx-443-tcp` (by port, same style as `CMSv6-*`
-    and `frps-*`) open the two ports.
+    directory `C:\nginx`, restart on failure 3× at 1-minute intervals).
+    Firewall rules `nginx-80-tcp` and `nginx-443-tcp` (by port, same style as
+    `CMSv6-*` and `frps-*`) both stay enabled — `nginx-80-tcp` now covers
+    CMSV6's own listener on 80, not nginx.
   - **Reload gotcha:** `nginx.exe -s reload` only works when run by the same
     Windows account that started the nginx master process — it signals a
     named Windows event (`Global\ngx_reload_<pid>`) scoped to that account.
@@ -283,9 +311,11 @@ externally as a fallback entry point; it is not closed by this setup.
   the original spec (video URLs coming from the API as absolute
   addresses/ports rather than relative to the page) — it isn't specifically
   a mixed-content/HTTPS problem, since HTTPS isn't externally reachable
-  anyway (see below). `http://scanvision.online/` and direct
-  `http://<адрес из SERVER>:8080/` are both unaffected either way, since
-  neither depends on the video stream routing through nginx.
+  anyway (see below). `http://scanvision.online/` is unaffected either way,
+  since it doesn't depend on the video stream routing through nginx. (The
+  direct `:8080` access path measured here no longer exists since
+  04.08.2026 — CMSV6's tomcat moved to port 80, see "Web access via domain"
+  above; the fallback entry point is now `http://<адрес из SERVER>/`.)
 
 ### Known limitation: HTTPS (443) not reachable from outside
 
@@ -293,7 +323,10 @@ The 443 listener, firewall rule, and certificate are all in place and correct
 on this machine, but external clients cannot complete a TLS handshake to
 `scanvision.online:443` — the connection hangs until timeout. This is **not**
 something wrong on this server; it was confirmed by direct measurement, not
-guessed:
+guessed. The 04.08.2026 (IPRSV1-11) port 80/443 topology split — CMSV6 moving
+onto port 80, nginx staying on 443 — does not change any of this: it was
+already true when nginx owned both ports, and nginx's ownership of 443 itself
+didn't change.
 
 - a plain TCP connection to port 443 from outside completes normally;
 - a plain (non-TLS) HTTP request sent to port 443 from outside gets a real
