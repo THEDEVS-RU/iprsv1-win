@@ -48,9 +48,12 @@ platform and a `frps` (fatedier/frp) reverse-proxy server.
 - **nginx** — reverse proxy in front of CMSV6's web UI, `C:\nginx` (nginx
   1.30.4). Terminates HTTP on port 80 for `scanvision.online` and
   `www.scanvision.online`; a 443 block also exists but HTTPS isn't reachable
-  from outside the machine (see below). **win-acme** — ACME client,
-  `C:\win-acme` (win-acme 2.2.9.1701), issues and renews the Let's Encrypt
-  certificate nginx uses.
+  from outside the machine (see below). nginx's 443 block uses a purchased
+  GlobalSign certificate, valid until 18.02.2027 (see below) — **replace it
+  manually before then, or HTTPS silently stops working**. **win-acme** —
+  ACME client, `C:\win-acme` (win-acme 2.2.9.1701); issued the original
+  Let's Encrypt certificate, but its renewal was cancelled 04.08.2026 and it
+  no longer issues or renews anything for this domain.
 
 ## frps
 
@@ -177,10 +180,12 @@ externally as a fallback entry point; it is not closed by this setup.
     denied)` — verified. To apply a config change manually over SSH, restart
     the scheduled task instead: `Stop-ScheduledTask -TaskName nginx` →
     (wait for both `nginx.exe` processes to exit) → `Start-ScheduledTask
-    -TaskName nginx`. This gotcha does **not** affect win-acme's automatic
-    renewal: its own scheduled task also runs as `SYSTEM`, so the post-install
-    script it calls (`C:\nginx\reload-nginx.bat`: `cd /d C:\nginx` +
-    `nginx.exe -s reload`) runs in the same account as nginx and succeeds.
+    -TaskName nginx` — but that wait is not by itself sufficient, see the
+    **Stop-ScheduledTask gotcha** below before trusting the restart is clean.
+    Historical note: this reload gotcha used to not affect win-acme's
+    automatic renewal, because its post-install script
+    (`C:\nginx\reload-nginx.bat`) ran `nginx.exe -s reload` as `SYSTEM` too —
+    moot now, win-acme's renewal for this domain was cancelled 04.08.2026.
   - **Working-directory gotcha:** `nginx.exe -t` (or `-s reload`) run from an
     SSH session's default directory fails on relative paths — nginx resolves
     `conf`/`logs` relative to its own working directory, not its exe location
@@ -215,37 +220,49 @@ externally as a fallback entry point; it is not closed by this setup.
   ```
   Certificate (issuer `CN=YR1, O=Let's Encrypt, C=US`) covers both names,
   valid 2026-07-30 → 2026-10-28. Files in `C:\nginx\ssl`:
-  `scanvision.online-chain.pem` (full chain, used as `ssl_certificate`),
-  `-key.pem` (private key, used as `ssl_certificate_key`), plus `-crt.pem`
-  (leaf only) and `-chain-only.pem` (CA chain only) which nginx doesn't use.
-  **Автопродление отключено (04.08.2026, IPRSV1-11).** Let's Encrypt на 443
-  больше не используется (см. купленный сертификат ниже), поэтому автопродление
-  для `scanvision.online` остановлено насовсем: регистрация отменена
+  `scanvision.online-chain.pem` (full chain, formerly used as
+  `ssl_certificate`), `-key.pem` (private key, formerly used as
+  `ssl_certificate_key`), plus `-crt.pem` (leaf only) and `-chain-only.pem`
+  (CA chain only) which nginx never used. None of the four are referenced by
+  `nginx.conf` anymore (see the GlobalSign paths above) — they're kept only
+  as the rollback path described below.
+  **Auto-renewal cancelled (04.08.2026, IPRSV1-11).** Let's Encrypt is no
+  longer used on 443 (see the purchased certificate below), so renewal for
+  `scanvision.online` was stopped for good: the registration was cancelled
   (`wacs.exe --cancel --friendlyname scanvision.online`), `wacs.exe --list`
-  её больше не показывает, задача планировщика **`win-acme renew
-  (acme-v02.api.letsencrypt.org)`** переведена в `Disabled` (не удалена).
-  win-acme (`C:\win-acme`) остаётся установленным на случай, если понадобится
-  снова. Файлы прежнего Let's Encrypt-сертификата (`scanvision.online-chain.pem`,
-  `-key.pem`, `-crt.pem`, `-chain-only.pem`, все от 30.07.2026) оставлены в
-  `C:\nginx\ssl` нетронутыми как путь отката — отзывать не нужно, сами истекут
-  28.10.2026.
+  no longer shows it, and the scheduled task **`win-acme renew
+  (acme-v02.api.letsencrypt.org)`** was set to `Disabled` (not deleted).
+  win-acme itself (`C:\win-acme`) stays installed in case it's needed again.
+  The old Let's Encrypt certificate files (`scanvision.online-chain.pem`,
+  `-key.pem`, `-crt.pem`, `-chain-only.pem`, all from 30.07.2026) are left
+  untouched in `C:\nginx\ssl` as the rollback path — no need to revoke them,
+  they expire on their own on 28.10.2026.
 
-- **Купленный сертификат (GlobalSign)** — с 04.08.2026 на 443 стоит
-  корпоративный сертификат вместо Let's Encrypt. Издатель `GlobalSign GCC R46
-  DV TLS CA 2025`, лист `CN=www.scanvision.online`, SAN покрывает
-  `www.scanvision.online`, `scanvision.online`, `autodiscover.scanvision.online`,
-  `mail.scanvision.online`, `owa.scanvision.online`, действует до 18.02.2027
-  (отпечаток `7A6B4D22DA6ADA2D4DCA06F7DC801AB583901B06`). Файлы в
-  `C:\nginx\ssl`: `scanvision.online-gs-chain.pem` (лист + промежуточный
-  `GlobalSign GCC R46 DV TLS CA 2025`, без корневого — клиенты берут его из
-  своего хранилища) и `scanvision.online-gs-key.pem` (ключ, ACL только
-  `SYSTEM`/`Administrators`, наследование отключено), оба без BOM. Исходный
-  комплект от регистратора лежит на сервере в
+- **Purchased certificate (GlobalSign).** **Expires 18.02.2027 — there is no
+  auto-renewal for it. Replace it manually before that date, or HTTPS on 443
+  stops working with no warning** (nothing in this repo monitors the expiry).
+  Since 04.08.2026, 443 uses this corporate certificate instead of
+  Let's Encrypt. Issuer `GlobalSign GCC R46 DV TLS CA 2025`, leaf
+  `CN=www.scanvision.online`, SAN covers `www.scanvision.online`,
+  `scanvision.online`, `autodiscover.scanvision.online`,
+  `mail.scanvision.online`, `owa.scanvision.online` (thumbprint
+  `7A6B4D22DA6ADA2D4DCA06F7DC801AB583901B06`). Files in `C:\nginx\ssl`:
+  `scanvision.online-gs-chain.pem` (leaf + intermediate
+  `GlobalSign GCC R46 DV TLS CA 2025`, no root — clients pull that from their
+  own store) and `scanvision.online-gs-key.pem` (key, ACL restricted to
+  `SYSTEM`/`Administrators`, inheritance disabled), both without a BOM. The
+  original kit from the registrar lives on the server in
   `C:\Users\Administrator\Desktop\srt` (`certificate.crt`/`certificate.key`/
-  `certificate_ca.crt`; `key.txt` в этой же папке — посторонний файл, не пара
-  ни к одному сертификату, использовать нельзя). Автопродления для этого
-  сертификата нет: при следующей замене (до 18.02.2027) цепочка собирается
-  так же вручную — лист, затем промежуточный, без корневого, без BOM.
+  `certificate_ca.crt`; `key.txt` in the same folder is an unrelated file, not
+  a pair to any certificate there, don't use it). That source `certificate.key`
+  is an unencrypted private-key copy sitting on the desktop with no ACL
+  restriction (unlike the deployed copy in `C:\nginx\ssl`) — whether to lock
+  it down or remove it is Максим's call, not done as part of this task. When
+  the certificate is next replaced, assemble the chain the same way by hand:
+  leaf, then intermediate, no root, no BOM. Note: this certificate is trusted
+  and served correctly, but it's still unverifiable from outside the machine
+  — see "Known limitation: HTTPS (443) not reachable from outside" below,
+  which this change did not touch.
 - **Proxy behavior verified from real traffic**, not just synthetic checks:
   `C:\nginx\logs\access.log` shows real clients successfully logging in
   through the proxy and CMSV6's main-interface websocket
