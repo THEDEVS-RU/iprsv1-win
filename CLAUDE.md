@@ -150,8 +150,10 @@ externally as a fallback entry point; it is not closed by this setup.
     (webroot for ACME HTTP-01 validation) and proxies everything else to
     `http://127.0.0.1:8080`.
   - `listen 443 ssl` — same proxy target, `ssl_certificate
-    C:/nginx/ssl/scanvision.online-chain.pem`, `ssl_certificate_key
-    C:/nginx/ssl/scanvision.online-key.pem`, `ssl_protocols TLSv1.2 TLSv1.3`.
+    C:/nginx/ssl/scanvision.online-gs-chain.pem`, `ssl_certificate_key
+    C:/nginx/ssl/scanvision.online-gs-key.pem` (купленный GlobalSign, see
+    below — заменил Let's Encrypt 04.08.2026), `ssl_protocols TLSv1.2
+    TLSv1.3`.
   - Both blocks set `Host`/`X-Real-IP`/`X-Forwarded-For`/`X-Forwarded-Proto`
     and `Upgrade`/`Connection` (via a `map $http_upgrade $connection_upgrade`)
     for CMSV6's websockets, `proxy_buffering off`, 3600s timeouts.
@@ -187,6 +189,20 @@ externally as a fallback entry point; it is not closed by this setup.
     "C:\Users\Administrator/conf/nginx.conf" failed`. Always run either from
     `C:\nginx` (`cd C:\nginx` first) or with explicit `-p`/`-c`:
     `nginx.exe -p C:\nginx -c conf\nginx.conf -t`.
+  - **Stop-ScheduledTask gotcha:** `Stop-ScheduledTask -TaskName nginx` does
+    not reliably kill a master process that has become detached from the
+    task's own job-object tracking (e.g. a leftover from an earlier manual
+    restart or a previous session) — verified 04.08.2026: an orphaned
+    `nginx.exe` from 30.07.2026 survived a `Stop-ScheduledTask` +
+    `Start-ScheduledTask` cycle and kept listening on both 80 and 443 in
+    parallel with the freshly started instance, so external requests were
+    randomly served by either process (old config/cert or new — dangerous
+    during a cert swap). After any restart via the scheduled task, verify
+    cleanly: `Get-Process -Name nginx` should show only the new instance's
+    PID(s) (check `StartTime`), and `Get-NetTCPConnection -State Listen |
+    Where LocalPort -in 80,443` should show only those PIDs across several
+    repeated checks (a single check can catch a transient/racy state). A
+    stale survivor → `Stop-Process -Id <pid> -Force`, then re-verify.
 - **win-acme** — `C:\win-acme` (win-acme 2.2.9.1701, `wacs.exe`). Issued the
   certificate with:
   ```
@@ -202,25 +218,34 @@ externally as a fallback entry point; it is not closed by this setup.
   `scanvision.online-chain.pem` (full chain, used as `ssl_certificate`),
   `-key.pem` (private key, used as `ssl_certificate_key`), plus `-crt.pem`
   (leaf only) and `-chain-only.pem` (CA chain only) which nginx doesn't use.
-  Renewal runs automatically via scheduled task **`win-acme renew
-  (acme-v02.api.letsencrypt.org)`** (`SYSTEM`, next due 2026-09-23) — no
-  manual action needed under normal operation. `--renew --force` ignores the
-  due date but does **not** bypass win-acme's own cache — a cached order/pfx
-  from the last issuance is reused for about a day afterwards ("Using cache
-  for scanvision.online... Order 1/1 (Main): handle from cache" in
-  `C:\ProgramData\win-acme\<baseuri>\Log\`), so running `--force` shortly
-  after an issuance just re-applies the same certificate (store + install
-  hooks run, no new ACME order or http-01 validation happens). To force a
-  genuinely new certificate, add `--nocache` — and that's specifically what
-  the weekly Let's Encrypt duplicate-certificate limit (5 per name set per
-  rolling week) applies to; a bare `--force` right after issuance doesn't
-  count against it. What actually happened 2026-07-30: a `--renew --force`
-  run at 20:49 (about 30 minutes after the initial issuance at ~20:22) hit
-  the cache — pem files in `C:\nginx\ssl` were rewritten and nginx reloaded
-  cleanly via a temporary SYSTEM-context scheduled task (interactive SSH
-  runs as `Administrator`, which would hit the reload gotcha above), but no
-  new certificate was issued and the end-to-end ACME/http-01 cycle itself was
-  only exercised once, by the original issuance.
+  **Автопродление отключено (04.08.2026, IPRSV1-11).** Let's Encrypt на 443
+  больше не используется (см. купленный сертификат ниже), поэтому автопродление
+  для `scanvision.online` остановлено насовсем: регистрация отменена
+  (`wacs.exe --cancel --friendlyname scanvision.online`), `wacs.exe --list`
+  её больше не показывает, задача планировщика **`win-acme renew
+  (acme-v02.api.letsencrypt.org)`** переведена в `Disabled` (не удалена).
+  win-acme (`C:\win-acme`) остаётся установленным на случай, если понадобится
+  снова. Файлы прежнего Let's Encrypt-сертификата (`scanvision.online-chain.pem`,
+  `-key.pem`, `-crt.pem`, `-chain-only.pem`, все от 30.07.2026) оставлены в
+  `C:\nginx\ssl` нетронутыми как путь отката — отзывать не нужно, сами истекут
+  28.10.2026.
+
+- **Купленный сертификат (GlobalSign)** — с 04.08.2026 на 443 стоит
+  корпоративный сертификат вместо Let's Encrypt. Издатель `GlobalSign GCC R46
+  DV TLS CA 2025`, лист `CN=www.scanvision.online`, SAN покрывает
+  `www.scanvision.online`, `scanvision.online`, `autodiscover.scanvision.online`,
+  `mail.scanvision.online`, `owa.scanvision.online`, действует до 18.02.2027
+  (отпечаток `7A6B4D22DA6ADA2D4DCA06F7DC801AB583901B06`). Файлы в
+  `C:\nginx\ssl`: `scanvision.online-gs-chain.pem` (лист + промежуточный
+  `GlobalSign GCC R46 DV TLS CA 2025`, без корневого — клиенты берут его из
+  своего хранилища) и `scanvision.online-gs-key.pem` (ключ, ACL только
+  `SYSTEM`/`Administrators`, наследование отключено), оба без BOM. Исходный
+  комплект от регистратора лежит на сервере в
+  `C:\Users\Administrator\Desktop\srt` (`certificate.crt`/`certificate.key`/
+  `certificate_ca.crt`; `key.txt` в этой же папке — посторонний файл, не пара
+  ни к одному сертификату, использовать нельзя). Автопродления для этого
+  сертификата нет: при следующей замене (до 18.02.2027) цепочка собирается
+  так же вручную — лист, затем промежуточный, без корневого, без BOM.
 - **Proxy behavior verified from real traffic**, not just synthetic checks:
   `C:\nginx\logs\access.log` shows real clients successfully logging in
   through the proxy and CMSV6's main-interface websocket
