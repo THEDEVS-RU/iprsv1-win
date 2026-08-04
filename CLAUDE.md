@@ -37,14 +37,17 @@ platform and a `frps` (fatedier/frp) reverse-proxy server.
 
 ## What's on the machine
 
-- **CMSV6** — the video/GPS platform (`C:\Program Files\CMSServerV6`):
-  services `GPSDaemon`, `GPSGatewaySvr`, `GPSMediaSvr`, `GPSLoginSvr`,
-  `GPSUserSvr`, `GPSDownSvr`, `GPSStorageSvr`, `GPSDataProcSvr`,
-  `GPSGeocodeSvr`, `GPSFtpd`, web UI on `gpstomcat6` (port 80, since
-  04.08.2026 — see below), MySQL on `GPSMysqld` (127.0.0.1:3311). Do not
-  stop/restart these services, touch their files, or change the `CMSv6-*`
-  firewall rules — the one documented exception is `gpstomcat6`, restarted
-  to apply a `server.xml` port change (see below).
+- **CMSV6** — the video/GPS platform. Installed at
+  `C:\Program Files\CMSServerV6`, but as of 04.08.2026 all services actually
+  run from `C:\Program Files\CMSServerV6old\` instead (verified via each
+  service's `PathName`, e.g. `gpstomcat6`) — check `PathName` before trusting
+  either path, CMSV6 reinstalls have moved it before. Services: `GPSDaemon`,
+  `GPSGatewaySvr`, `GPSMediaSvr`, `GPSLoginSvr`, `GPSUserSvr`, `GPSDownSvr`,
+  `GPSStorageSvr`, `GPSDataProcSvr`, `GPSGeocodeSvr`, `GPSFtpd`, web UI on
+  `gpstomcat6` (port 80, since 04.08.2026 — see below), MySQL on `GPSMysqld`
+  (127.0.0.1:3311). Do not stop/restart these services, touch their files, or
+  change the `CMSv6-*` firewall rules — the one documented exception is
+  `gpstomcat6`, restarted to apply a `server.xml` port change (see below).
 - **frps** — reverse-proxy server, `C:\Users\Administrator\Desktop\6e9`
   (`frps.exe`, `frps.ini`, `frps.log`).
 - **nginx** — reverse proxy in front of CMSV6's web UI, `C:\nginx` (nginx
@@ -165,8 +168,11 @@ directly.
 **Reinstall gotcha:** any CMSV6 update or reinstall overwrites `server.xml`
 from the vendor package and puts the connector back on port 8080 — after
 every such update, port 80 has to be set again in the fresh `server.xml`
-(above) and `gpstomcat6` restarted, or `http://scanvision.online/` stops
-answering even though nothing else on the machine changed. Firewall rule
+(above) and `gpstomcat6` restarted — otherwise both entry points break, not
+just the plain one: `http://scanvision.online/` stops answering, and
+`https://scanvision.online/` starts returning 502 too, since nginx's 443
+block proxies to `http://127.0.0.1:80` and finds nothing there once tomcat
+reverts to 8080. Firewall rule
 `nginx-80-tcp` stays enabled on port 80 as before — it was never
 nginx-specific, it just opens the port; the process behind it changed from
 nginx to CMSV6.
@@ -333,8 +339,13 @@ didn't change.
   `400 Bad Request` back from nginx — so data does flow both ways on that
   port, just not when the payload is a TLS handshake;
 - a TLS handshake from outside to the *other* externally-open ports on this
-  same machine — 9966, 9967, 7500, 8080 — completes instantly; TLS traffic as
-  a class is not being stripped on the path;
+  same machine — 9966, 9967, 7500, 8080 — completed instantly at measurement
+  time (30.07.2026); TLS traffic as a class is not being stripped on the
+  path. Port-specific caveat, not re-measured since: nothing listens on 8080
+  since 04.08.2026 (CMSV6 moved to 80, see above) and frps has been down
+  since 30.07.2026 (9966/9967/7500 unlisted, separate known issue) — a
+  repeat check on those four ports today would measure "nothing answers",
+  not "TLS is stripped", don't conflate the two;
 - from the machine itself, TLS to port 443 (via `127.0.0.1` and via its own
   public address) completes in ~50ms with a valid response.
 
