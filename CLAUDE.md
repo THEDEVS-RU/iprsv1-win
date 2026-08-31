@@ -112,7 +112,7 @@ Verified 31.08.2026 unless noted.
 |---|---|---|
 | `nginx_run` | `C:\nginx\run_nginx.bat` | at startup, SYSTEM. The `.bat` is idempotent — it checks `tasklist` for a running `nginx.exe` and only then `cd /d C:\nginx` + `start "" nginx.exe`, so it cannot raise a second master. |
 | `frps` | `C:\frps\run-frps.bat` | at startup + every 5 min (repeats forever), SYSTEM. The `.bat` is idempotent (`tasklist` check, same pattern as `nginx_run`'s), the task has no `ExecutionTimeLimit`, `MultipleInstances IgnoreNew`, and restarts on failure (1 min × 3). See "frps" section below for the 17.08.2026 outage and how it's watched now. |
-| `frps-watchdog` | `powershell.exe -File C:\frps\frps-watchdog.ps1` | every 5 min (offset from `frps`'s own trigger), SYSTEM, `ExecutionTimeLimit PT5M`. No-op when `frps.exe` is alive; otherwise clears a task instance stuck `Running` with no live process and re-triggers `frps`. See "frps" section below. |
+| `frps-watchdog` | `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\frps\frps-watchdog.ps1` | every 5 min (offset from `frps`'s own trigger), SYSTEM, `ExecutionTimeLimit PT5M`. No-op when `frps.exe` is alive; otherwise unconditionally re-triggers `frps` (`Stop-ScheduledTask` first, only if the `frps` task's own state is still `Running`). See "frps" section below. |
 | `win-acme renew (…)` | `C:\wacs\wacs.exe` | vendor task, renews `test.thedevs.ru` only. |
 
 A second, duplicate `nginx` task existed briefly on 14.08.2026 (with its own
@@ -462,10 +462,14 @@ contradictory:
    `Get-ScheduledTaskInfo`'s `LastRunTime` advances on every 5-minute trigger
    *evaluation*, including one `IgnoreNew` skips, not only on an instance
    that actually starts. Watched it happen live: process PID/`StartTime`
-   unchanged across a trigger boundary, yet `LastRunTime` still jumped
-   (18:27:27 → 18:32:32 — the same ~30–40 s lag as 16:42:01's trigger vs. the
-   observed 16:42:42). Not a restart, phantom or otherwise — confirmed
-   explained, not left unestablished.
+   unchanged across a trigger boundary, yet `LastRunTime` still advanced in
+   step with the grid, from 18:27 to 18:32 (`Get-ScheduledTaskInfo`'s
+   `LastRunTime`/`NextRunTime` mirror the minute value into the seconds
+   field — e.g. `18:27:27`, `NextRunTime 18:52:52` — that's a display
+   artifact, not a real offset: read them as `18:27`, `18:52`. There is no
+   tens-of-seconds lag, and `16:42:42` above is likewise just `16:42`). Not a
+   restart, phantom or otherwise — confirmed explained, not left
+   unestablished.
 3. **16:45:53–16:46, IPRSV1-16** rewrote `frps.ini` (dashboard bound to
    `127.0.0.1`, `token`/`dashboard_pwd` rotated) and stopped the still-stuck
    16:27 instance (`Stop-ScheduledTask`, logged as "stopped ... as request by
@@ -478,28 +482,27 @@ review):** `taskkill /F /IM frps.exe`, twice, each waited out to full
 recovery:
 
 - kill 1 at 18:22:04 → new process listening on all four ports at 18:24:05 —
-  **121 s**, recovered via `RestartOnFailure` (Task Scheduler logged a plain
-  instance launch, not tagged "due to a time trigger condition" —
-  `run-frps.bat`'s `cmd.exe` wrapper exits with the killed child's own
-  non-zero code, `2147942401` / `0x80070001`, which Task Scheduler *does*
-  count as an action failure);
+  **121 s**, recovered by `frps-watchdog`: its own 5-minute trigger fired at
+  18:24:01, found no live `frps.exe`, and called `schtasks /run /tn frps`
+  unconditionally 4 s later (event 110, on-demand run) — there is no
+  `RestartOnFailure` event anywhere between the 18:22:04 kill and 18:24:01;
 - kill 2 at 18:24:20 → new process listening at 18:27:01 — **161 s**,
-  recovered via the 5-minute repeating trigger this time (tagged "due to a
-  time trigger condition") — `RestartOnFailure`'s own retries didn't win the
-  race;
+  recovered via `frps`'s own 5-minute repeating trigger this time (tagged
+  "due to a time trigger condition", event 107) — `frps-watchdog`'s next
+  tick hadn't come up yet;
 - both times: exactly one `frps.exe` process, all four ports owned by its
   PID, well under the 5-minute target either way.
 
-So `RestartOnFailure` (≤1 min per attempt, 3 attempts) and the 5-minute
-trigger both cover a `taskkill`-style kill, whichever fires first — only an
-engine-level stop (`Stop-ScheduledTask`/`schtasks /end`, logged as the
-different sentinel `4294967295`, not counted as a failure) bypasses
-`RestartOnFailure` and depends on the repeating trigger alone. That is
-exactly the 16:27 case above: a live process behind a stuck task instance,
-cleared only when IPRSV1-16 issued `Stop-ScheduledTask`. `IgnoreNew` + no
-`ExecutionTimeLimit` means a task stuck like that — `Running` with no live
-`frps.exe` behind it — would block recovery forever, silently; that gap is
-what `frps-watchdog` below exists to close.
+Two recovery paths are actually verified, not three: `frps-watchdog`
+(kill 1) and `frps`'s own repeating trigger (kill 2). `RestartOnFailure`
+did not fire in either test: `run-frps.bat`'s `cmd.exe` wrapper does exit
+with the killed child's own non-zero code (`2147942401` / `0x80070001`), but
+Task Scheduler logs that as a plain "successfully completed" action (event
+201), not as a failure that hands off to `RestartOnFailure` — don't rely on
+it for this task's specific kill/wrapper combination. What actually closes
+the "stuck `Running` with no live process" gap is `frps-watchdog`, and it is
+not a passive zombie-cleaner — see "Как frps теперь присматривается" below
+for how it really behaves.
 
 **Measured after IPRSV1-16's restart (still true):**
 
@@ -568,24 +571,49 @@ of it is excluded.
   disabled before 31.08.2026) — next time frps stops, that channel and
   `C:\frps\frps-run.log` are the first two places to look.
 - **`frps-watchdog` (added during IPRSV1-14 review round 1, 31.08.2026):** a
-  second scheduled task, `C:\frps\frps-watchdog.ps1`, SYSTEM/HighestAvailable,
-  `IgnoreNew`, running every 5 minutes offset from `frps`'s own trigger, with
-  its own bounded `ExecutionTimeLimit = PT5M` (unlike `frps`'s `PT0S`,
-  because this action is always meant to finish in seconds). It closes the
-  gap found above: `IgnoreNew` treats "task instance registered as `Running`"
-  as reason enough to skip a retry, whether or not `frps.exe` is actually
-  alive — so a stuck/zombie instance (observed once, ~19 minutes, above)
-  silently blocks every future 5-minute recovery attempt forever. The script:
-  if `Get-Process frps` finds a live process, it exits immediately and
-  touches nothing (verified manually against the live process, 31.08.2026 —
-  true no-op); otherwise, if the `frps` task's own `State` is still `Running`
-  with no process behind it, it calls `Stop-ScheduledTask -TaskName frps` to
-  clear the zombie and then `schtasks /run /tn frps` for an immediate retry
-  instead of waiting out the remainder of the 5-minute window. The
-  zombie-clearing branch is reasoned through and only exercised read-only so
-  far — forcing a real stuck instance to test it means another live outage,
-  and the healthy-path behavior above already has two clean back-to-back real
-  recovery tests, 31.08.2026 evening (121 s and 161 s, see above).
+  second scheduled task, `C:\frps\frps-watchdog.ps1`
+  (`powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File
+  ...`), SYSTEM/HighestAvailable, `IgnoreNew`, running every 5 minutes offset
+  from `frps`'s own trigger, with its own bounded `ExecutionTimeLimit = PT5M`
+  (unlike `frps`'s `PT0S`, because this action is always meant to finish in
+  seconds). **Not a passive zombie-cleaner — it's a real third recovery
+  path, and the one that actually fired in testing:** the script exits
+  immediately and touches nothing only if `Get-Process frps` finds a live
+  process; otherwise it calls `schtasks /run /tn frps` **unconditionally** —
+  `Stop-ScheduledTask -TaskName frps` runs first only as a conditional
+  cleanup, when the `frps` task's own `State` is still `Running` (the
+  stuck-instance case, ~19 minutes, above). Confirmed live, 31.08.2026
+  evening: after `taskkill /F /IM frps.exe` with the `frps` task in plain
+  `Ready` state (no stuck instance, so the `Stop-ScheduledTask` branch never
+  ran), `frps-watchdog`'s own trigger found no live process and raised
+  `frps` unconditionally — that's kill 1 above (121 s). Only the
+  `Stop-ScheduledTask` cleanup branch remains untested live — forcing a real
+  stuck instance to test it means another live outage.
+- **Known gap in `frps-watchdog` itself:** both `Get-Process`/
+  `Stop-ScheduledTask` calls swallow errors (`-ErrorAction
+  SilentlyContinue`), `schtasks /run`'s own exit code is discarded
+  (`Out-Null`), and the script always exits `0` — so
+  `Microsoft-Windows-TaskScheduler/Operational` logs the same "success, code
+  0" whether a tick did nothing or actually restarted `frps`. Already cost
+  real time once: reconstructing which mechanism recovered kill 1 above took
+  cross-referencing several event IDs instead of reading it off directly.
+  Left as-is on purpose for this task — a log line
+  (`C:\frps\frps-watchdog.log`) or `Write-EventLog` call at the point it
+  actually acts, plus checking `schtasks /run`'s own exit code, would close
+  this; not done here.
+- **`frps`'s own `LastTaskResult`/`LastRunTime` are no longer useful health
+  signals in normal operation.** With the 5-minute repeating trigger plus
+  `IgnoreNew`, every 5-minute tick while `frps.exe` is alive gets refused —
+  observed live, 31.08.2026 evening, with `frps.exe` healthy since 16:46:
+  `LastTaskResult = 2147946720` (`net helpmsg 4320` → "The operator or
+  administrator has refused the request", `0x800710E0`). That is now the
+  *normal*, healthy reading — not the `267014`/`0x41306` ("terminated by the
+  scheduler") that flagged the original 17.08.2026 outage, and it no longer
+  means anything is wrong on its own. Also, `Get-ScheduledTaskInfo`'s
+  `LastRunTime`/`NextRunTime` display their minute value mirrored into the
+  seconds field (e.g. `18:47:47`, `NextRunTime 18:52:52`) — read as
+  `18:47`/`18:52`, not literal timestamps to the second. Check liveness with
+  `Get-Process frps` and the four ports, not either field.
 
 ### How a recorder is reached
 
