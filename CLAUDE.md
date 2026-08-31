@@ -292,8 +292,8 @@ Config `C:\frps\frps.ini`, INI format only (this build does not understand
 TOML/YAML). Verified 31.08.2026:
 
 ```ini
-bind_port = 7000            # frpc clients connect here
-vhost_http_port = 9966      # device subdomains are served here
+bind_port = 7000
+vhost_http_port = 9966
 vhost_https_port = 9967
 subdomain_host = scanvision.online
 tcp_mux = true
