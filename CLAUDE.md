@@ -260,9 +260,22 @@ both `listen 443 ssl`, both `proxy_pass http://127.0.0.1:80`:
    plus OCSP stapling (`ssl_stapling on`, `ssl_trusted_certificate
    scanvision-trusted.crt`, `resolver 8.8.8.8 8.8.4.4`).
 
-Both blocks set `Host`, `X-Real-IP`, `X-Forwarded-For`, `X-Forwarded-Proto`.
+Both blocks set `Host`, `X-Real-IP`, `X-Forwarded-For`, `X-Forwarded-Proto`,
+and (added 31.08.2026, IPRSV1-15) six more directives in the same `location /`:
+`proxy_http_version 1.1;`, `proxy_set_header Upgrade $http_upgrade;`,
+`proxy_set_header Connection $connection_upgrade;`, `proxy_buffering off;`,
+`proxy_read_timeout 3600s;`, `proxy_send_timeout 3600s;`.
 There is **no** `listen 80` block (CMSV6 owns 80), no ACME webroot location,
 no HSTS and no redirect to 443 — port 80 is a first-class way in, deliberately.
+
+`proxy_buffering off` and the 3600 s timeouts sit on the shared `location /`,
+not on a dedicated `location /ws/` — deliberately: CMSV6 has two known ws
+paths (`/ws/webSocket/index/1`, `/ws/webSocket/down/1`) but that list comes
+from log analysis and isn't guaranteed complete, and a path outside a
+dedicated `/ws/` location would silently fall back to the default 60 s
+timeout and drop under idle. The trade-off is that ordinary HTTP traffic on
+this host now also runs unbuffered with long timeouts — accepted because
+traffic here is small (~7k requests/5 days, see `access.log` analysis below).
 
 The cert/key paths documented here before (`C:\nginx\ssl\scanvision.online-gs-*.pem`)
 are gone — `C:\nginx\ssl` does not exist any more. Config backups sit next to
@@ -561,6 +574,12 @@ as the gate.
 
 Effect: CMSV6's main-interface sockets (`/ws/webSocket/index/1`,
 `/ws/webSocket/down/1`) now work over both `http://` and `https://`.
+
+The remaining acceptance criterion — the main CMSV6 interface at
+`https://scanvision.online/` visibly updating data in real time — is a
+by-eye browser check, not something scriptable from here; it is left to
+Максим to confirm. The `101`/byte-identical-body checks above cover the
+protocol-level behaviour the browser check would rely on.
 
 Separately, and unchanged: the **video stream never goes through nginx at all**.
 Five days of `access.log` (31.07–03.08.2026, ~7k real requests) show the
