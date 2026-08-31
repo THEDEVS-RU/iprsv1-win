@@ -151,6 +151,13 @@ reinstalled since, and the vendor now ships the same coverage under new names:
   16607-16609, 16611, 20000-21000, 30000-31000**
 - `iprsv1-13-ports-udp` (IPRSV1-13, created 31.08.2026) — UDP **6602-6612,
   20000-21000, 30000-31000**
+- `iprsv1-17-ports-tcp` (IPRSV1-17, created 31.08.2026) — TCP **16604, 16605**,
+  `-Profile Any -RemoteAddress Any -Program Any`, for the two nginx media-proxy
+  listeners above. Note: **16605 and 16604 were already covered** by
+  `iprsv1-13-ports-tcp`'s `16603-16605` range (confirmed — both ports answered
+  from outside before this rule existed), so this rule is a deliberate
+  task-scoped duplicate for documentation clarity, same pattern as the
+  existing named rules, not a functional gap-fill.
 
 **IPRSV1-13 (31.08.2026): decision by Максим — open the full requested list,
 overlap with the dynamic port range accepted.** He was shown the risk first
@@ -267,7 +274,32 @@ no HSTS and no redirect to 443 — port 80 is a first-class way in, deliberately
 
 The cert/key paths documented here before (`C:\nginx\ssl\scanvision.online-gs-*.pem`)
 are gone — `C:\nginx\ssl` does not exist any more. Config backups sit next to
-the live file: `nginx.conf.bak`, `nginx.conf.bak2`, `nginx.conf.bak-20260814`.
+the live file: `nginx.conf.bak`, `nginx.conf.bak2`, `nginx.conf.bak-20260814`,
+`nginx.conf.bak-20260831b` (IPRSV1-17, before adding the two media-port
+listeners below; `nginx.conf.bak-20260831` — no `b` suffix — is IPRSV1-16's,
+unrelated).
+
+**Media-under-HTTPS listeners (IPRSV1-17, added 31.08.2026).** Two more
+`server` blocks, same cert as the `scanvision.online` 443 block, no
+`ssl_stapling` (only needed on the public 443 entry point):
+
+- `listen 16605 ssl;` → `proxy_pass http://127.0.0.1:6605;` — CMSV6's
+  `GPSLoginSvr` (the login server). The H5 player's video/archive/PTT flow
+  starts here: under `https:`, the page GETs
+  `https://scanvision.online:16605/3/1?...` (i.e. login-server port + 10000)
+  to resolve the media server's address before ever touching a media port.
+- `listen 16604 ssl;` → `proxy_pass http://127.0.0.1:6604;` — CMSV6's
+  `GPSMediaSvr` (the media server). This is where the actual `wss://` video
+  stream (`clientPort` from the `/3/1` response, also +10000) lands; live
+  video, archive playback and intercom all multiplex over this one port —
+  confirmed by sweeping `MediaType`/`Type` combinations against the login
+  server, which returned the same `clientPort:6604` in every case. See
+  "CMSV6 platform config" below for why a working listener here still wasn't
+  enough on its own.
+- If DevTools ever shows a PTT `wss://` connection on a port other than
+  16604/16605 (the intercom's second, runtime-assigned port — see "CMSV6
+  platform config"), add the identical pattern for it: nginx listener at
+  `port+10000`, firewall port, and an entry in the `HttpsMapHttpPort` map.
 
 - 🔴 **Missing websocket proxying — see "Known issue" below.**
 - **Reload gotcha:** `nginx.exe -s reload` only works when run by the account
@@ -311,6 +343,82 @@ the live file: `nginx.conf.bak`, `nginx.conf.bak2`, `nginx.conf.bak-20260814`.
 - **Let's Encrypt** — only for `test.thedevs.ru` now (renewal due 28.09.2026).
   Renewal for `scanvision.online` was cancelled on 04.08.2026 and its old
   `.pem` files are gone along with `C:\nginx\ssl`.
+
+### CMSV6 platform config exposed to clients (IsHttps, server addresses)
+
+The H5 player (`808gps/js/cmsv6player.min.js`) does not build `wss://` from
+the page's own `https:` protocol alone — it first GETs
+`http(s)://<login-server-host>:<login-server-port[+10000 under https]>/3/1?MediaType=..&Type=..&AVType=..&DevIDNO=..&Channel=..`
+and only switches to `wss://` if that response's `IsHttps` field is truthy.
+The one-shot check-tool for all of this, from the server itself:
+
+```
+GET http://127.0.0.1:6605/3/1?MediaType=1&Type=0&AVType=1&DevIDNO=900000400219&Channel=0
+```
+
+Fields that matter in the response: `IsHttps`, `server.clientIp`/`lanip`
+(what the player uses as the stream host — falls back to these unless
+`location.hostname` already equals one of `clientIp`/`clientIp2`/`clientIp3`/
+`lanip`), `server.clientPort` (the media port, mapped through `HttpsMapPort`
+or `+10000` by default), `HttpsMapPort` (only present once `IsHttps` is true).
+
+**Where these values live:**
+
+- `server.clientIp`/`lanip`/`clientPort`/`deviceIp`/`devicePort` for the
+  media server (`svrid: 3` in the response) come from `1010GPS.server_info`,
+  row `ID=3` (`IDNO='M1'`, `Name='Media Server'`). 🔴 This table is **not**
+  empty on this machine (12 rows, present since 04.08.2026) — an earlier
+  investigation assumed it was; always `SELECT * FROM server_info` before
+  touching it, an `INSERT` against an already-populated table would create a
+  conflicting/duplicate row. To publish a domain name instead of the IP,
+  `UPDATE` the existing row's `IPClient`/`LanIP` columns only —
+  `IPDevice`/`PortDevice`/`PortClient` must stay exactly as measured
+  (GPS devices, not browsers, connect via `IPDevice`/`PortDevice`, and those
+  are not the values being fixed here). Done 31.08.2026 (IPRSV1-17):
+  `IPClient`/`LanIP` → `scanvision.online` on `ID=3`; confirmed live only
+  after a `GPSLoginSvr` restart — this table is read once at service start,
+  not per-request.
+- The `HttpsMapHttpPort`→`HttpsMapPort` map is the pre-existing (empty)
+  `1010GPS.jt808_system_params` row `id=61` (`data_type`/`data_code` both
+  `HttpsMapHttpPort`). Format is `src:dst;src:dst`, matched 1:1 with the
+  player's own map parser. Set 31.08.2026 to `6604:16604;6605:16605`
+  (identical to the `+10000` default, made explicit so the mapping is visible
+  in the DB and extensible for a future intercom port). Also read once at
+  service start, and — per the finding below — appears to only surface in the
+  `/3/1` response at all once `IsHttps` is true.
+- 🔴 **`IsHttps` — the flag itself has no documented handle, and neither
+  candidate mechanism found by reading `libmsgproc_clientmedia.dll` /
+  `libvehicleinfo_jt808.dll` worked, even after a `GPSLoginSvr` restart
+  (approved by Максим, 31.08.2026, task chat IPRSV1-17):**
+  1. A `jt808_system_params` row `data_type='Https'`, `data_code='HttpsPort'`,
+     `data_value='443'` (same shape as `id=61`/`62`) — tested and rolled back,
+     no effect even after restart.
+  2. An autodetected `<CMSV6 install>\nginx\conf\nginx.conf` (the vendor's own
+     nginx tree, which ships no `nginx.conf` out of the box — only sample
+     `nginx-*.conf` files) with one `listen 443 ssl` block — tested and rolled
+     back, no effect even after restart. The vendor nginx itself is **not**
+     started for this — the file is read as data, not executed.
+  Both hypotheses are exhausted; `IsHttps` still reports `0`. **Next step is a
+  vendor support request, not further guessing** — do not try more
+  `jt808_system_params` rows at random and do not edit the vendor DLLs/JS.
+  Until this is resolved, the browser player will keep building `ws://` (not
+  `wss://`) under `https:` pages and mixed-content-block itself before ever
+  reaching the nginx listeners below, regardless of how well those listeners
+  work on their own.
+- Both DB changes above (and both `IsHttps` experiments) were confirmed to
+  need a `GPSLoginSvr` restart to take effect — this service caches
+  `server_info`/`jt808_system_params` at startup rather than reading them
+  per-request. `GPSLoginSvr` is a separate, comparatively cheap restart from
+  `gpstomcat6` (no ~3.5 min downtime observed) but is still a live-platform
+  action — get explicit sign-off before restarting it, same as for any other
+  CMSV6 service.
+- Pre-change dumps of both touched tables sit next to the nginx config
+  backups, not in the repo: `C:\nginx\conf\server_info.bak-20260831.sql`,
+  `C:\nginx\conf\jt808_system_params.bak-20260831.sql`
+  (`mysqldump`, `1010GPS` DB on `127.0.0.1:3311`; credentials in
+  `tomcat\webapps\gpsweb\WEB-INF\classes\config\jdbc.properties` under the
+  live CMSV6 tree — not repeated here, see "Access is SSH" above for the
+  don't-commit-secrets rule).
 
 ## DNS
 
