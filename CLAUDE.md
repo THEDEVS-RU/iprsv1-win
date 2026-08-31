@@ -266,9 +266,16 @@ no HSTS and no redirect to 443 — port 80 is a first-class way in, deliberately
 
 The cert/key paths documented here before (`C:\nginx\ssl\scanvision.online-gs-*.pem`)
 are gone — `C:\nginx\ssl` does not exist any more. Config backups sit next to
-the live file: `nginx.conf.bak`, `nginx.conf.bak2`, `nginx.conf.bak-20260814`.
+the live file: `nginx.conf.bak`, `nginx.conf.bak2`, `nginx.conf.bak-20260814`,
+`nginx.conf.bak-20260831`.
 
-- 🔴 **Missing websocket proxying — see "Known issue" below.**
+At the `http {}` level: `client_max_body_size 512m;` (added 31.08.2026,
+IPRSV1-15 — see "Fixed: websockets…" below for why 512m) and a
+`map $http_upgrade $connection_upgrade { default upgrade; '' close; }` used by
+both `location /` blocks for websocket upgrade.
+
+- ✅ **Websocket proxying — fixed 31.08.2026, see "Fixed: websockets now
+  survive the 443 proxy" below.**
 - **Reload gotcha:** `nginx.exe -s reload` only works when run by the account
   that started the master process. The scheduled task runs nginx as `SYSTEM`,
   so a reload from an interactive SSH session (running as `Administrator`)
@@ -504,27 +511,56 @@ connects only to 6601/6603/6607 and to the CMSV6 web port — it never touches
 step is packet-level capture on the operator's machine, not more guessing on
 the server.
 
-## 🔴 Known issue: websockets do not survive the 443 proxy
+## ✅ Fixed: websockets now survive the 443 proxy (31.08.2026, IPRSV1-15)
 
-Reproduced 31.08.2026 from outside, same request, two ports:
+**Before**, reproduced 31.08.2026 13:00 UTC from outside, same request, two ports:
 
 | Request | Result |
 |---|---|
 | `https://scanvision.online/ws/webSocket/index/1` with `Upgrade: websocket` | **404** |
 | `http://scanvision.online/ws/webSocket/index/1` with `Upgrade: websocket` | **101 Switching Protocols** |
 
-Cause (direct, from the config): the current `nginx.conf` sets no
-`proxy_http_version 1.1` and no `Upgrade`/`Connection` headers, so nginx
-downgrades the request to a plain HTTP/1.0 proxy call and tomcat answers 404.
-An earlier revision of this config had a `map $http_upgrade $connection_upgrade`
-block plus `proxy_buffering off` and 3600 s timeouts; the current file (rebuilt
-14.08.2026) does not. Also missing from `http {}`: `client_max_body_size`
-(default 1 m, so uploads over 1 MB through 443 get 413).
+Cause (direct, from the config): `nginx.conf` set no `proxy_http_version 1.1`
+and no `Upgrade`/`Connection` headers, so nginx downgraded the request to a
+plain HTTP/1.0 proxy call and tomcat answered 404. **Correction of a claim
+this file made before 31.08.2026:** there was no earlier config revision with
+`map $http_upgrade $connection_upgrade` — `findstr` over `nginx.conf.bak`,
+`.bak2` and `.bak-20260814` on 31.08.2026 found no ws directives in any of
+them (while a control search for `proxy_pass` matched all three, so the files
+do get read), so the fix below is an addition, not a restore. Also missing
+from `http {}`: `client_max_body_size` (default 1 m, so uploads over 1 MB
+through 443 got 413).
+
+**Fix applied 31.08.2026 (IPRSV1-15):** backed up the live config to
+`nginx.conf.bak-20260831`, then added at the `http {}` level
+`map $http_upgrade $connection_upgrade { default upgrade; '' close; }` and
+`client_max_body_size 512m;`, and in both `location /` blocks:
+`proxy_http_version 1.1;`, `proxy_set_header Upgrade $http_upgrade;`,
+`proxy_set_header Connection $connection_upgrade;`, `proxy_buffering off;`,
+`proxy_read_timeout 3600s;`, `proxy_send_timeout 3600s;`. Applied via
+`taskkill /F /IM nginx.exe` + `schtasks /run /tn nginx_run` (the only way to
+apply a config change, see "Reload gotcha" above) — verified no orphaned
+master afterwards.
+
+`512m` is deliberate, not arbitrary: CMSV6's own upload ceiling is 500 MB
+(`web.xml`'s `<max-file-size>524288000</max-file-size>`,
+`struts.properties`'s `struts.multipart.maxFileSize=524288000`, connector
+`maxPostSize="-1"`), so nginx's limit sits just above the application's, kept
+as the gate.
+
+**After**, verified 31.08.2026 from outside, same request as above:
+
+| Request | Result |
+|---|---|
+| `https://scanvision.online/ws/webSocket/index/1` | **101**, `Sec-WebSocket-Accept` present |
+| `https://scanvision.online/ws/webSocket/down/1` | **101** |
+| `https://test.thedevs.ru/ws/webSocket/index/1` | **101** |
+| `http://scanvision.online/ws/webSocket/index/1` and `/down/1` | still **101** — port 80 behaviour unchanged |
+| `https://scanvision.online/` and `https://test.thedevs.ru/` | **200**, cert chain valid — plain HTTPS unaffected |
+| POST 2 000 000 bytes to `https://scanvision.online/` | full body reached the backend (`size_upload=2000000`, no 413); response now byte-identical to the same POST over `http://` |
 
 Effect: CMSV6's main-interface sockets (`/ws/webSocket/index/1`,
-`/ws/webSocket/down/1`) work over `http://` and fail over `https://`. Not yet
-fixed — the fix is four lines in each `location /`, but it needs an nginx
-restart on a live platform, so it is Максим's call.
+`/ws/webSocket/down/1`) now work over both `http://` and `https://`.
 
 Separately, and unchanged: the **video stream never goes through nginx at all**.
 Five days of `access.log` (31.07–03.08.2026, ~7k real requests) show the
