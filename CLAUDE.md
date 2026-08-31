@@ -449,36 +449,57 @@ contradictory:
    the 17.08.2026 20:16 outage (cause investigated below) and fixed the
    scheduled task so a stop like that can't repeat unnoticed (mechanism in
    "Как frps теперь присматривается" below).
-2. **~16:37–16:42, still IPRSV1-14** killed `frps.exe` twice in a row to test
-   the new auto-recovery (results below). This is what IPRSV1-16 independently
-   observed a few minutes later as "task already `Running`, `LastRunTime`
-   16:42:42" before it had touched anything — not an unexplained restart,
-   just IPRSV1-14's own second recovery cycle finishing.
+2. **16:15–16:46, IPRSV1-14** — while reconfiguring the task and running
+   diagnostics from several concurrent SSH sessions, one task instance
+   (started 16:27:01) ended up stuck in `Running` for **~19 minutes** with a
+   live, healthy `frps.exe` behind it: `run-frps.bat`'s last line runs
+   `frps.exe` in the foreground, so its wrapper only exits when the process
+   does — by design, not a bug — and `IgnoreNew` correctly blocked the
+   5-minute trigger's retries at 16:32, 16:37 and 16:42 because an instance
+   really was still running. **This is what explains IPRSV1-16's
+   "unexplained fact"** ("task already `Running`, `LastRunTime` 16:42:42"
+   before it had touched anything) — reproduced directly, 31.08.2026 evening:
+   `Get-ScheduledTaskInfo`'s `LastRunTime` advances on every 5-minute trigger
+   *evaluation*, including one `IgnoreNew` skips, not only on an instance
+   that actually starts. Watched it happen live: process PID/`StartTime`
+   unchanged across a trigger boundary, yet `LastRunTime` still jumped
+   (18:27:27 → 18:32:32 — the same ~30–40 s lag as 16:42:01's trigger vs. the
+   observed 16:42:42). Not a restart, phantom or otherwise — confirmed
+   explained, not left unestablished.
 3. **16:45:53–16:46, IPRSV1-16** rewrote `frps.ini` (dashboard bound to
-   `127.0.0.1`, `token`/`dashboard_pwd` rotated) and restarted the task to
-   apply it. That restart produced the `frps.exe` process still running now.
+   `127.0.0.1`, `token`/`dashboard_pwd` rotated) and stopped the still-stuck
+   16:27 instance (`Stop-ScheduledTask`, logged as "stopped ... as request by
+   user Administrator") to restart the task and apply it. That restart
+   produced the `frps.exe` process that then ran undisturbed for ~1.5 hours.
 
-**Measured by IPRSV1-14, before IPRSV1-16's restart:**
+**Auto-recovery test, 31.08.2026 evening (clean, back-to-back — supersedes an
+earlier in-session estimate that turned out not to match the event log on
+review):** `taskkill /F /IM frps.exe`, twice, each waited out to full
+recovery:
 
-- one `frps.exe` process, all four ports (7000, 9966, 9967, 7500) listening
-  and owned by the same PID;
-- killed `frps.exe` twice in a row: both times the task instance registered
-  as completed (return code `4294967295`, i.e. "terminated externally" — Task
-  Scheduler does not treat that as an action *failure*, so `RestartOnFailure`
-  never fired for either kill) and frps came back only via the 5-minute
-  repeating trigger, in **252 s** and **267 s** respectively (~4–4.5 min —
-  under the 5 min target both times, but with less margin than
-  `RestartOnFailure` alone would give for a genuine crash);
-- one earlier, non-clean attempt — killing an instance that had been started
-  by a manual `schtasks /run` while several diagnostic SSH sessions were
-  querying the task at the same time — left a stale task instance stuck in
-  `Running` for **9+ minutes**, with `IgnoreNew` blocking every retry until
-  that instance's own wrapper process was killed by hand. This did not
-  reproduce in either of the two clean back-to-back tests, but it is a real
-  gap: `IgnoreNew` + no `ExecutionTimeLimit` means a task stuck `Running`
-  with no live `frps.exe` behind it blocks recovery forever, silently — the
-  exact failure mode this task exists to close. Closed by `frps-watchdog`,
-  see "Как frps теперь присматривается" below.
+- kill 1 at 18:22:04 → new process listening on all four ports at 18:24:05 —
+  **121 s**, recovered via `RestartOnFailure` (Task Scheduler logged a plain
+  instance launch, not tagged "due to a time trigger condition" —
+  `run-frps.bat`'s `cmd.exe` wrapper exits with the killed child's own
+  non-zero code, `2147942401` / `0x80070001`, which Task Scheduler *does*
+  count as an action failure);
+- kill 2 at 18:24:20 → new process listening at 18:27:01 — **161 s**,
+  recovered via the 5-minute repeating trigger this time (tagged "due to a
+  time trigger condition") — `RestartOnFailure`'s own retries didn't win the
+  race;
+- both times: exactly one `frps.exe` process, all four ports owned by its
+  PID, well under the 5-minute target either way.
+
+So `RestartOnFailure` (≤1 min per attempt, 3 attempts) and the 5-minute
+trigger both cover a `taskkill`-style kill, whichever fires first — only an
+engine-level stop (`Stop-ScheduledTask`/`schtasks /end`, logged as the
+different sentinel `4294967295`, not counted as a failure) bypasses
+`RestartOnFailure` and depends on the repeating trigger alone. That is
+exactly the 16:27 case above: a live process behind a stuck task instance,
+cleared only when IPRSV1-16 issued `Stop-ScheduledTask`. `IgnoreNew` + no
+`ExecutionTimeLimit` means a task stuck like that — `Running` with no live
+`frps.exe` behind it — would block recovery forever, silently; that gap is
+what `frps-watchdog` below exists to close.
 
 **Measured after IPRSV1-16's restart (still true):**
 
@@ -553,7 +574,7 @@ of it is excluded.
   because this action is always meant to finish in seconds). It closes the
   gap found above: `IgnoreNew` treats "task instance registered as `Running`"
   as reason enough to skip a retry, whether or not `frps.exe` is actually
-  alive — so a stuck/zombie instance (observed once, 9+ minutes, above)
+  alive — so a stuck/zombie instance (observed once, ~19 minutes, above)
   silently blocks every future 5-minute recovery attempt forever. The script:
   if `Get-Process frps` finds a live process, it exits immediately and
   touches nothing (verified manually against the live process, 31.08.2026 —
@@ -564,7 +585,7 @@ of it is excluded.
   zombie-clearing branch is reasoned through and only exercised read-only so
   far — forcing a real stuck instance to test it means another live outage,
   and the healthy-path behavior above already has two clean back-to-back real
-  recovery tests from before this task existed.
+  recovery tests, 31.08.2026 evening (121 s and 161 s, see above).
 
 ### How a recorder is reached
 
