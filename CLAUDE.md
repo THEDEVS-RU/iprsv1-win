@@ -332,10 +332,19 @@ fix, 31.08.2026 ~16:30:
 
 - one `frps.exe` process, all four ports (7000, 9966, 9967, 7500) listening
   and owned by the same PID;
-- from outside: `http://201.34.132.26:7500/` returns **401** (dashboard
-  reachable, auth required — the port passes `GPS services TCP 2` fine); a
-  made-up subdomain on `:9966` returns **404 from frps** (vhost routing works
-  end to end, independent of any registered device);
+- from outside: 7000/9966/9967 accept connections; `:7500` (the dashboard)
+  times out — as of 31.08.2026 ~16:45 it is no longer reachable externally at
+  all, because two parallel tasks on this same server tightened it in the same
+  window: IPRSV1-13 dropped port 7500 from firewall rule `GPS services TCP 2`,
+  and IPRSV1-16 rebound `dashboard_addr` from `0.0.0.0` to `127.0.0.1` in
+  `frps.ini` (confirmed on the machine: the file's own `LastWriteTime` is
+  31.08.2026 16:45:53, minutes before this task's own fix). Not a regression
+  from this task — this task does not touch `frps.ini` or firewall rules (see
+  "Не трогать") and did not revert either change. A made-up subdomain on
+  `:9966` returns **404 from frps** (vhost routing works end to end,
+  independent of any registered device, and independent of the dashboard) —
+  that is what actually satisfies this task's own external-reachability
+  criterion now that `:7500` is intentionally closed;
 - no `frpc` client re-registered in the 30 minutes after the raise — the log's
   last `client login`/`proxy listen` lines are still the 17.08.2026 ones for
   device `900000400273`. Expected: `frpc` runs on the recorder, not on this
