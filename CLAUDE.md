@@ -93,9 +93,9 @@ Verified 31.08.2026 unless noted.
   "Web entry points" below.
 - **frps** — reverse-proxy server, now at **`C:\frps`** (moved off
   `C:\Users\Administrator\Desktop\6e9`, which no longer exists). Version
-  **0.17.0**. See "frps" below. ✅ **Up, dashboard closed, as of 31.08.2026** —
-  see "Current state: frps is UP, dashboard closed" under "frps" for the
-  measurements.
+  **0.17.0**. See "frps" below. ✅ **Up, self-healing, dashboard closed, as of
+  31.08.2026** — see "Current state: frps is UP, self-healing, dashboard
+  closed" under "frps" for the measurements.
 - **win-acme** — ACME client, now at **`C:\wacs`** (`C:\win-acme` no longer
   exists), win-acme 2.2.9.1701. Its scheduled task
   `win-acme renew (acme-v02.api.letsencrypt.org)` is **enabled** and healthy
@@ -111,7 +111,8 @@ Verified 31.08.2026 unless noted.
 | Task | Action | Notes |
 |---|---|---|
 | `nginx_run` | `C:\nginx\run_nginx.bat` | at startup, SYSTEM. The `.bat` is idempotent — it checks `tasklist` for a running `nginx.exe` and only then `cd /d C:\nginx` + `start "" nginx.exe`, so it cannot raise a second master. |
-| `frps` | `C:\frps\run-frps.bat` | at startup, SYSTEM. The `.bat` is `cd /d C:\frps` + `frps.exe -c C:\frps\frps.ini` in the foreground — when frps exits, the task ends with it. |
+| `frps` | `C:\frps\run-frps.bat` | at startup + every 5 min (repeats forever), SYSTEM. The `.bat` is idempotent (`tasklist` check, same pattern as `nginx_run`'s), the task has no `ExecutionTimeLimit`, `MultipleInstances IgnoreNew`, and restarts on failure (1 min × 3). See "frps" section below for the 17.08.2026 outage and how it's watched now. |
+| `frps-watchdog` | `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\frps\frps-watchdog.ps1` | every 5 min (offset from `frps`'s own trigger), SYSTEM, `ExecutionTimeLimit PT5M`. No-op when `frps.exe` is alive; otherwise unconditionally re-triggers `frps` (`Stop-ScheduledTask` first, only if the `frps` task's own state is still `Running`). See "frps" section below. |
 | `win-acme renew (…)` | `C:\wacs\wacs.exe` | vendor task, renews `test.thedevs.ru` only. |
 
 A second, duplicate `nginx` task existed briefly on 14.08.2026 (with its own
@@ -260,35 +261,15 @@ both `listen 443 ssl`, both `proxy_pass http://127.0.0.1:80`:
    plus OCSP stapling (`ssl_stapling on`, `ssl_trusted_certificate
    scanvision-trusted.crt`, `resolver 8.8.8.8 8.8.4.4`).
 
-Both blocks set `Host`, `X-Real-IP`, `X-Forwarded-For`, `X-Forwarded-Proto`,
-and (added 31.08.2026, IPRSV1-15) six more directives in the same `location /`:
-`proxy_http_version 1.1;`, `proxy_set_header Upgrade $http_upgrade;`,
-`proxy_set_header Connection $connection_upgrade;`, `proxy_buffering off;`,
-`proxy_read_timeout 3600s;`, `proxy_send_timeout 3600s;`.
+Both blocks set `Host`, `X-Real-IP`, `X-Forwarded-For`, `X-Forwarded-Proto`.
 There is **no** `listen 80` block (CMSV6 owns 80), no ACME webroot location,
 no HSTS and no redirect to 443 — port 80 is a first-class way in, deliberately.
 
-`proxy_buffering off` and the 3600 s timeouts sit on the shared `location /`,
-not on a dedicated `location /ws/` — deliberately: CMSV6 has two known ws
-paths (`/ws/webSocket/index/1`, `/ws/webSocket/down/1`) but that list comes
-from log analysis and isn't guaranteed complete, and a path outside a
-dedicated `/ws/` location would silently fall back to the default 60 s
-timeout and drop under idle. The trade-off is that ordinary HTTP traffic on
-this host now also runs unbuffered with long timeouts — accepted because
-traffic here is small (~7k requests/5 days, see `access.log` analysis below).
-
 The cert/key paths documented here before (`C:\nginx\ssl\scanvision.online-gs-*.pem`)
 are gone — `C:\nginx\ssl` does not exist any more. Config backups sit next to
-the live file: `nginx.conf.bak`, `nginx.conf.bak2`, `nginx.conf.bak-20260814`,
-`nginx.conf.bak-20260831`.
+the live file: `nginx.conf.bak`, `nginx.conf.bak2`, `nginx.conf.bak-20260814`.
 
-At the `http {}` level: `client_max_body_size 512m;` (added 31.08.2026,
-IPRSV1-15 — see "Fixed: websockets…" below for why 512m) and a
-`map $http_upgrade $connection_upgrade { default upgrade; '' close; }` used by
-both `location /` blocks for websocket upgrade.
-
-- ✅ **Websocket proxying — fixed 31.08.2026, see "Fixed: websockets now
-  survive the 443 proxy" below.**
+- 🔴 **Missing websocket proxying — see "Known issue" below.**
 - **Reload gotcha:** `nginx.exe -s reload` only works when run by the account
   that started the master process. The scheduled task runs nginx as `SYSTEM`,
   so a reload from an interactive SSH session (running as `Administrator`)
@@ -458,31 +439,181 @@ template that would preserve them automatically.
   `server/control.go`'s `RegisterProxy` comparison against
   `max_ports_per_client` never trips for CMSV6 traffic.
 
-### ✅ Current state: frps is UP, dashboard closed (as of 31.08.2026)
+### ✅ Current state: frps is UP, self-healing, dashboard closed (as of 31.08.2026)
 
-Measured after this task's (IPRSV1-16) restart:
+Two independent tasks changed this server within the same hour, in this
+order — kept straight here because their timestamps otherwise look
+contradictory:
+
+1. **16:01, IPRSV1-14** raised frps by hand (`schtasks /run /tn frps`) after
+   the 17.08.2026 20:16 outage (cause investigated below) and fixed the
+   scheduled task so a stop like that can't repeat unnoticed (mechanism in
+   "Как frps теперь присматривается" below).
+2. **16:15–16:46, IPRSV1-14** — while reconfiguring the task and running
+   diagnostics from several concurrent SSH sessions, one task instance
+   (started 16:27:01) ended up stuck in `Running` for **~19 minutes** with a
+   live, healthy `frps.exe` behind it: `run-frps.bat`'s last line runs
+   `frps.exe` in the foreground, so its wrapper only exits when the process
+   does — by design, not a bug — and `IgnoreNew` correctly blocked the
+   5-minute trigger's retries at 16:32, 16:37 and 16:42 because an instance
+   really was still running. **This is what explains IPRSV1-16's
+   "unexplained fact"** ("task already `Running`, `LastRunTime` 16:42:42"
+   before it had touched anything) — reproduced directly, 31.08.2026 evening:
+   `Get-ScheduledTaskInfo`'s `LastRunTime` advances on every 5-minute trigger
+   *evaluation*, including one `IgnoreNew` skips, not only on an instance
+   that actually starts. Watched it happen live: process PID/`StartTime`
+   unchanged across a trigger boundary, yet `LastRunTime` still advanced in
+   step with the grid, from 18:27 to 18:32 (`Get-ScheduledTaskInfo`'s
+   `LastRunTime`/`NextRunTime` mirror the minute value into the seconds
+   field — e.g. `18:27:27`, `NextRunTime 18:52:52` — that's a display
+   artifact, not a real offset: read them as `18:27`, `18:52`. There is no
+   tens-of-seconds lag, and `16:42:42` above is likewise just `16:42`). Not a
+   restart, phantom or otherwise — confirmed explained, not left
+   unestablished.
+3. **16:45:53–16:46, IPRSV1-16** rewrote `frps.ini` (dashboard bound to
+   `127.0.0.1`, `token`/`dashboard_pwd` rotated) and stopped the still-stuck
+   16:27 instance (`Stop-ScheduledTask`, logged as "stopped ... as request by
+   user Administrator") to restart the task and apply it. That restart
+   produced the `frps.exe` process that then ran undisturbed for ~1.5 hours.
+
+**Auto-recovery test, 31.08.2026 evening (clean, back-to-back — supersedes an
+earlier in-session estimate that turned out not to match the event log on
+review):** `taskkill /F /IM frps.exe`, twice, each waited out to full
+recovery:
+
+- kill 1 at 18:22:04 → new process listening on all four ports at 18:24:05 —
+  **121 s**, recovered by `frps-watchdog`: its own 5-minute trigger fired at
+  18:24:01, found no live `frps.exe`, and called `schtasks /run /tn frps`
+  unconditionally 4 s later (event 110, on-demand run) — there is no
+  `RestartOnFailure` event anywhere between the 18:22:04 kill and 18:24:01;
+- kill 2 at 18:24:20 → new process listening at 18:27:01 — **161 s**,
+  recovered via `frps`'s own 5-minute repeating trigger this time (tagged
+  "due to a time trigger condition", event 107) — `frps-watchdog`'s next
+  tick hadn't come up yet;
+- both times: exactly one `frps.exe` process, all four ports owned by its
+  PID, well under the 5-minute target either way.
+
+Two recovery paths are actually verified, not three: `frps-watchdog`
+(kill 1) and `frps`'s own repeating trigger (kill 2). `RestartOnFailure`
+did not fire in either test: `run-frps.bat`'s `cmd.exe` wrapper does exit
+with the killed child's own non-zero code (`2147942401` / `0x80070001`), but
+Task Scheduler logs that as a plain "successfully completed" action (event
+201), not as a failure that hands off to `RestartOnFailure` — don't rely on
+it for this task's specific kill/wrapper combination. What actually closes
+the "stuck `Running` with no live process" gap is `frps-watchdog`, and it is
+not a passive zombie-cleaner — see "Как frps теперь присматривается" below
+for how it really behaves.
+
+**Measured after IPRSV1-16's restart (still true):**
 
 - `frps.exe` running, exactly one process, brought up by
   `Start-ScheduledTask -TaskName 'frps'` at 31.08.2026 16:46;
 - fresh `frps-run.log` lines: `frps tcp listen on 0.0.0.0:7000`, `http service
   listen on 0.0.0.0:9966`, `https service listen on 0.0.0.0:9967`,
   **`Dashboard listen on 127.0.0.1:7500`**, `Start frps success`;
-- externally: 7000/9966/9967 accept connections, 7500 times out;
-  `http://scanvision.online/` and `https://scanvision.online/` both `200`;
+- externally: 7000/9966/9967 accept connections; `:7500` times out — closed on
+  purpose (IPRSV1-16's firewall-rule and `dashboard_addr` change above), not a
+  regression from IPRSV1-14, which never touches `frps.ini` or firewall rules.
+  A made-up subdomain on `:9966` still returns **404 from frps** — vhost
+  routing works end to end and does not depend on the dashboard, which is
+  what actually satisfies IPRSV1-14's own external-reachability criterion now
+  that `:7500` is intentionally closed;
+- `http://scanvision.online/` and `https://scanvision.online/` both `200`;
 - `Get-NetTCPConnection -State Listen -LocalPort 7500` shows only
-  `127.0.0.1`.
+  `127.0.0.1`;
+- no `frpc` client has re-registered since — expected, see "Token rotation"
+  above: every recorder's `frpc.ini`/`frpcSet.xml` still holds the
+  pre-rotation token until a human updates it.
 
-**Unexplained fact found by this task's pre-check, before its own restart:**
-the scheduled task was already `Running` with a live `frps.exe`
-(`LastRunTime` 31.08.2026 16:42:42) — contradicting the "down since
-17.08.2026 20:16" state this file recorded until now: the last line in
-`frps-run.log` before this task was **17.08.2026 20:16:05**, and the task's
-`LastTaskResult` was **267014** (`0x41306`, "last run terminated by user").
-Something restarted it between the last sweep and this check; **the cause is
-not established here** and is out of this task's scope — frps' startup/restart
-reliability belongs to IPRSV1-14. This task restarted it anyway, through its
-own normal `Stop-`/`Start-ScheduledTask` procedure, to apply the new config
-regardless of what was already running.
+**17.08.2026 20:16 stop — cause still not established.** Evidence taken
+31.08.2026 before any change (saved on the machine as
+`C:\frps\frps-task-before-2026-08-31.xml`, the rollback path):
+
+- the `ExecutionTimeLimit = PT72H` hypothesis previously written here is
+  **refuted**: the pre-change task XML has **no `<ExecutionTimeLimit>`
+  element at all**, not `PT72H`;
+- excluded directly by the evidence: an idle-triggered stop
+  (`<RunOnlyIfIdle>` was absent from the XML, i.e. false, so the
+  `<IdleSettings>` block present alongside it was inert); an OS-level
+  crash/power-loss/resource exhaustion around 17.08.2026 20:16 (`System` and
+  `Application` logs reach back to 02.08.2026 04:07, fully covering
+  17.08 18:00–18.08 02:00, and hold nothing but routine service start/stop
+  noise — no `Kernel-Power`, no `Resource-Exhaustion-Detector`, no
+  `Application Error`/`Application Hang` for `frps.exe`); a panic inside frps
+  itself — the log's last lines are ordinary `Accept new mux stream error:
+  broken pipe` warnings, no panic, no shutdown line;
+- can't be excluded, because no telemetry existed to check it either way: an
+  explicit `schtasks /end`/`Stop-ScheduledTask` call — the one channel that
+  would show it, `Microsoft-Windows-TaskScheduler/Operational`, was
+  **disabled** (confirmed 31.08.2026) with zero history for 14–18.08.2026,
+  now fixed (see below); the task's own
+  `<StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>` — implausible on a
+  VDS with no battery, but nothing rules it out;
+- the `Security` log's own oldest entry is 30.08.2026 20:08 (~20h retention,
+  confirming the note further down that it covers under a day) — it never
+  reached 17.08.2026, so event 4689 was never checkable either way.
+
+Do not add a cause beyond what's above — none of it is confirmed, only some
+of it is excluded.
+
+### Как frps теперь присматривается (since 31.08.2026)
+
+- `C:\frps\run-frps.bat` is idempotent, same pattern as `C:\nginx\run_nginx.bat`:
+  a `tasklist` check exits immediately if `frps.exe` is already running,
+  otherwise it starts it in the foreground. Old version backed up on the
+  machine as `run-frps.bat.bak-2026-08-31`.
+- Task `frps`: `<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>` (no limit),
+  two triggers — at startup, and every 5 minutes with no end —
+  `MultipleInstances IgnoreNew`, `RestartOnFailure` 1 min × 3, principal
+  unchanged (`SYSTEM`, `HighestAvailable`). Action unchanged, still
+  `C:\frps\run-frps.bat`.
+- `Microsoft-Windows-TaskScheduler/Operational` is enabled (20 MB, was
+  disabled before 31.08.2026) — next time frps stops, that channel and
+  `C:\frps\frps-run.log` are the first two places to look.
+- **`frps-watchdog` (added during IPRSV1-14 review round 1, 31.08.2026):** a
+  second scheduled task, `C:\frps\frps-watchdog.ps1`
+  (`powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File
+  ...`), SYSTEM/HighestAvailable, `IgnoreNew`, running every 5 minutes offset
+  from `frps`'s own trigger, with its own bounded `ExecutionTimeLimit = PT5M`
+  (unlike `frps`'s `PT0S`, because this action is always meant to finish in
+  seconds). **Not a passive zombie-cleaner — it's a real third recovery
+  path, and the one that actually fired in testing:** the script exits
+  immediately and touches nothing only if `Get-Process frps` finds a live
+  process; otherwise it calls `schtasks /run /tn frps` **unconditionally** —
+  `Stop-ScheduledTask -TaskName frps` runs first only as a conditional
+  cleanup, when the `frps` task's own `State` is still `Running` (the
+  stuck-instance case, ~19 minutes, above). Confirmed live, 31.08.2026
+  evening: after `taskkill /F /IM frps.exe` with the `frps` task in plain
+  `Ready` state (no stuck instance, so the `Stop-ScheduledTask` branch never
+  ran), `frps-watchdog`'s own trigger found no live process and raised
+  `frps` unconditionally — that's kill 1 above (121 s). Only the
+  `Stop-ScheduledTask` cleanup branch remains untested live — forcing a real
+  stuck instance to test it means another live outage.
+- **Known gap in `frps-watchdog` itself:** both `Get-Process`/
+  `Stop-ScheduledTask` calls swallow errors (`-ErrorAction
+  SilentlyContinue`), `schtasks /run`'s own exit code is discarded
+  (`Out-Null`), and the script always exits `0` — so
+  `Microsoft-Windows-TaskScheduler/Operational` logs the same "success, code
+  0" whether a tick did nothing or actually restarted `frps`. Already cost
+  real time once: reconstructing which mechanism recovered kill 1 above took
+  cross-referencing several event IDs instead of reading it off directly.
+  Left as-is on purpose for this task — a log line
+  (`C:\frps\frps-watchdog.log`) or `Write-EventLog` call at the point it
+  actually acts, plus checking `schtasks /run`'s own exit code, would close
+  this; not done here.
+- **`frps`'s own `LastTaskResult`/`LastRunTime` are no longer useful health
+  signals in normal operation.** With the 5-minute repeating trigger plus
+  `IgnoreNew`, every 5-minute tick while `frps.exe` is alive gets refused —
+  observed live, 31.08.2026 evening, with `frps.exe` healthy since 18:27:01:
+  `LastTaskResult = 2147946720` (`net helpmsg 4320` → "The operator or
+  administrator has refused the request", `0x800710E0`). That is now the
+  *normal*, healthy reading — not the `267014`/`0x41306` ("terminated by the
+  scheduler") that flagged the original 17.08.2026 outage, and it no longer
+  means anything is wrong on its own. Also, `Get-ScheduledTaskInfo`'s
+  `LastRunTime`/`NextRunTime` display their minute value mirrored into the
+  seconds field (e.g. `18:47:47`, `NextRunTime 18:52:52`) — read as
+  `18:47`/`18:52`, not literal timestamps to the second. Check liveness with
+  `Get-Process frps` and the four ports, not either field.
 
 ### How a recorder is reached
 
@@ -524,62 +655,27 @@ connects only to 6601/6603/6607 and to the CMSV6 web port — it never touches
 step is packet-level capture on the operator's machine, not more guessing on
 the server.
 
-## ✅ Fixed: websockets now survive the 443 proxy (31.08.2026, IPRSV1-15)
+## 🔴 Known issue: websockets do not survive the 443 proxy
 
-**Before**, reproduced 31.08.2026 13:00 UTC from outside, same request, two ports:
+Reproduced 31.08.2026 from outside, same request, two ports:
 
 | Request | Result |
 |---|---|
 | `https://scanvision.online/ws/webSocket/index/1` with `Upgrade: websocket` | **404** |
 | `http://scanvision.online/ws/webSocket/index/1` with `Upgrade: websocket` | **101 Switching Protocols** |
 
-Cause (direct, from the config): `nginx.conf` set no `proxy_http_version 1.1`
-and no `Upgrade`/`Connection` headers, so nginx downgraded the request to a
-plain HTTP/1.0 proxy call and tomcat answered 404. **Correction of a claim
-this file made before 31.08.2026:** there was no earlier config revision with
-`map $http_upgrade $connection_upgrade` — `findstr` over `nginx.conf.bak`,
-`.bak2` and `.bak-20260814` on 31.08.2026 found no ws directives in any of
-them (while a control search for `proxy_pass` matched all three, so the files
-do get read), so the fix below is an addition, not a restore. Also missing
-from `http {}`: `client_max_body_size` (default 1 m, so uploads over 1 MB
-through 443 got 413).
-
-**Fix applied 31.08.2026 (IPRSV1-15):** backed up the live config to
-`nginx.conf.bak-20260831`, then added at the `http {}` level
-`map $http_upgrade $connection_upgrade { default upgrade; '' close; }` and
-`client_max_body_size 512m;`, and in both `location /` blocks:
-`proxy_http_version 1.1;`, `proxy_set_header Upgrade $http_upgrade;`,
-`proxy_set_header Connection $connection_upgrade;`, `proxy_buffering off;`,
-`proxy_read_timeout 3600s;`, `proxy_send_timeout 3600s;`. Applied via
-`taskkill /F /IM nginx.exe` + `schtasks /run /tn nginx_run` (the only way to
-apply a config change, see "Reload gotcha" above) — verified no orphaned
-master afterwards.
-
-`512m` is deliberate, not arbitrary: CMSV6's own upload ceiling is 500 MB
-(`web.xml`'s `<max-file-size>524288000</max-file-size>`,
-`struts.properties`'s `struts.multipart.maxFileSize=524288000`, connector
-`maxPostSize="-1"`), so nginx's limit sits just above the application's, kept
-as the gate.
-
-**After**, verified 31.08.2026 from outside, same request as above:
-
-| Request | Result |
-|---|---|
-| `https://scanvision.online/ws/webSocket/index/1` | **101**, `Sec-WebSocket-Accept` present |
-| `https://scanvision.online/ws/webSocket/down/1` | **101** |
-| `https://test.thedevs.ru/ws/webSocket/index/1` | **101** |
-| `http://scanvision.online/ws/webSocket/index/1` and `/down/1` | still **101** — port 80 behaviour unchanged |
-| `https://scanvision.online/` and `https://test.thedevs.ru/` | **200**, cert chain valid — plain HTTPS unaffected |
-| POST 2 000 000 bytes to `https://scanvision.online/` | full body reached the backend (`size_upload=2000000`, no 413); response now byte-identical to the same POST over `http://` |
+Cause (direct, from the config): the current `nginx.conf` sets no
+`proxy_http_version 1.1` and no `Upgrade`/`Connection` headers, so nginx
+downgrades the request to a plain HTTP/1.0 proxy call and tomcat answers 404.
+An earlier revision of this config had a `map $http_upgrade $connection_upgrade`
+block plus `proxy_buffering off` and 3600 s timeouts; the current file (rebuilt
+14.08.2026) does not. Also missing from `http {}`: `client_max_body_size`
+(default 1 m, so uploads over 1 MB through 443 get 413).
 
 Effect: CMSV6's main-interface sockets (`/ws/webSocket/index/1`,
-`/ws/webSocket/down/1`) now work over both `http://` and `https://`.
-
-The remaining acceptance criterion — the main CMSV6 interface at
-`https://scanvision.online/` visibly updating data in real time — is a
-by-eye browser check, not something scriptable from here; it is left to
-Максим to confirm. The `101`/byte-identical-body checks above cover the
-protocol-level behaviour the browser check would rely on.
+`/ws/webSocket/down/1`) work over `http://` and fail over `https://`. Not yet
+fixed — the fix is four lines in each `location /`, but it needs an nginx
+restart on a live platform, so it is Максим's call.
 
 Separately, and unchanged: the **video stream never goes through nginx at all**.
 Five days of `access.log` (31.07–03.08.2026, ~7k real requests) show the
