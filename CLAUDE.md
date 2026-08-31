@@ -23,6 +23,19 @@ and were not re-measured. The last full sweep was **31.08.2026**.
     ```bash
     ssh -i ~/.ssh/id_ed25519 Administrator@$SERVER
     ```
+  - **SSH key from the k8s AI runners** (added 31.08.2026): a second
+    `ssh-ed25519` key with comment `ai-runner@ai-runners` is installed in the
+    same `administrators_authorized_keys`. Its private half lives only inside
+    the two pods of namespace `ai-runners` on the 192.168.88.248 cluster
+    (`ai-runner-thedevs-global`, `ai-runner-orca`), at
+    `/home/user/.ssh/id_ed25519` on the PVC mounted at `/home/user` — so it
+    survives pod restarts but not a PVC recreation. Both pods have an
+    `~/.ssh/config` alias, so from inside a pod it is just:
+    ```bash
+    ssh iprsv1 "hostname"
+    ```
+    A backup of the pre-change key file is on the server as
+    `administrators_authorized_keys.bak-20260831`.
   - **Password**, from repository variables/secrets `SERVER`, `LOGIN`,
     `PASSWORD` (env `$SERVER`, `$LOGIN`, `$PASSWORD` in a runner session):
     ```bash
