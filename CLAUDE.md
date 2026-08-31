@@ -93,7 +93,9 @@ Verified 31.08.2026 unless noted.
   "Web entry points" below.
 - **frps** — reverse-proxy server, now at **`C:\frps`** (moved off
   `C:\Users\Administrator\Desktop\6e9`, which no longer exists). Version
-  **0.17.0**. See "frps" below. 🔴 **Not running as of 31.08.2026.**
+  **0.17.0**. See "frps" below. ✅ **Up, self-healing, dashboard closed, as of
+  31.08.2026** — see "Current state: frps is UP, self-healing, dashboard
+  closed" under "frps" for the measurements.
 - **win-acme** — ACME client, now at **`C:\wacs`** (`C:\win-acme` no longer
   exists), win-acme 2.2.9.1701. Its scheduled task
   `win-acme renew (acme-v02.api.letsencrypt.org)` is **enabled** and healthy
@@ -110,6 +112,7 @@ Verified 31.08.2026 unless noted.
 |---|---|---|
 | `nginx_run` | `C:\nginx\run_nginx.bat` | at startup, SYSTEM. The `.bat` is idempotent — it checks `tasklist` for a running `nginx.exe` and only then `cd /d C:\nginx` + `start "" nginx.exe`, so it cannot raise a second master. |
 | `frps` | `C:\frps\run-frps.bat` | at startup + every 5 min (repeats forever), SYSTEM. The `.bat` is idempotent (`tasklist` check, same pattern as `nginx_run`'s), the task has no `ExecutionTimeLimit`, `MultipleInstances IgnoreNew`, and restarts on failure (1 min × 3). See "frps" section below for the 17.08.2026 outage and how it's watched now. |
+| `frps-watchdog` | `powershell.exe -File C:\frps\frps-watchdog.ps1` | every 5 min (offset from `frps`'s own trigger), SYSTEM, `ExecutionTimeLimit PT5M`. No-op when `frps.exe` is alive; otherwise clears a task instance stuck `Running` with no live process and re-triggers `frps`. See "frps" section below. |
 | `win-acme renew (…)` | `C:\wacs\wacs.exe` | vendor task, renews `test.thedevs.ru` only. |
 
 A second, duplicate `nginx` task existed briefly on 14.08.2026 (with its own
@@ -118,44 +121,68 @@ for port 443. Do not recreate it; `nginx_run` is the only one.
 
 ### Firewall (inbound, enabled)
 
-Verified 31.08.2026, re-measured same day for IPRSV1-13. The `frps-*`
-per-port rules documented here previously no longer exist. The `CMSv6-*`-named
-rules seen on 30.07.2026 (`CMSv6-6601-6612-tcp`/`-udp`, `CMSv6-6631-6635-tcp`,
+Verified 31.08.2026, re-measured same day for IPRSV1-13 (before and after
+creating the two rules below — 100 enabled inbound allow rules before, 102
+after, no other rule touched). The `frps-*` per-port rules documented here
+previously no longer exist. The `CMSv6-*`-named rules seen on 30.07.2026
+(`CMSv6-6601-6612-tcp`/`-udp`, `CMSv6-6631-6635-tcp`,
 `CMSv6-2121-2122-6617-2162-8080-tcp`) are also gone — CMSV6 has been
 reinstalled since, and the vendor now ships the same coverage under new names:
 
 - `GPS services TCP` — TCP **80, 443, 6617, 6631-6635, 2122-2162, 6601-6612**
 - `GPS services UDP` — UDP **6601-6612**
-- `GPS services TCP 2` — TCP **7000, 9966, 9967, 7500, 20021, 22**
+- `GPS services TCP 2` — TCP **7000, 9966, 9967, 20021, 22** (7500 removed
+  31.08.2026, IPRSV1-16 — the frps dashboard on that port is no longer
+  exposed, see `## frps` below)
 - `nginx 80` — TCP 80 (the listener behind it is CMSV6's tomcat, not nginx)
 - `nginx 443` — TCP 443
 - `OpenSSH Server (sshd)` — TCP 22
+- `OpenSSH SSH Server Preview (sshd)` — TCP 22, a second enabled rule for the
+  same port
 - the vendor's `GPSNginx`/`GPS *` rules (`GPSLoginSvr`, `GPSGatewaySvr`,
   `GPSMediaSvr`, `GPSUserSvr`, `GPSDownSvr`, `GPSServerControl`,
   `GPSStorageSvr`, `GPSTomcat`, `GPSFtpd`, `GPSGeocodeSvr`, `GPSRedisd`) —
-  protocol Any, scoped by program rather than port, left untouched; their
-  actual port coverage cannot be read from the firewall alone.
+  each is a *pair* of rules, one TCP and one UDP, both with `LocalPort Any`
+  (confirmed via `Get-NetFirewallPortFilter`; not "protocol Any") — scoped by
+  program rather than port, left untouched; their actual port coverage
+  cannot be read from the firewall alone.
+- `iprsv1-13-ports-tcp` (IPRSV1-13, created 31.08.2026) — TCP **80, 88, 443,
+  2121-2162, 6601-6612, 6617, 6630-6635, 8080, 8088, 16601, 16603-16605,
+  16607-16609, 16611, 20000-21000, 30000-31000**
+- `iprsv1-13-ports-udp` (IPRSV1-13, created 31.08.2026) — UDP **6602-6612,
+  20000-21000, 30000-31000**
 
-🔴 **IPRSV1-13 (31.08.2026): two consolidated rules were planned
-(`iprsv1-13-ports-tcp` TCP, `iprsv1-13-ports-udp` UDP, covering the CMSV6
-platform's full published port list) but were NOT created — blocked, needs
-Максим's decision.** Reason: the measured Windows dynamic/ephemeral port
-range on this machine is **9000-64999** (see "Dynamic port range" below), not
-the default starting at 49152, and it overlaps several entries of that port
-list — `16601`, `16603-16605`, `16607-16609`, `16611`, `20000-21000`,
-`30000-31000`, for both TCP and UDP. An inbound-allow rule there would also
-expose whatever local process's ephemeral outbound source port happens to
-land in that span at any given moment, which is not what was asked for.
-Coverage measured before this task, list vs. the rules above and a live
-listener snapshot: open — TCP 80, 443, 2122-2162, 6601-6612, 6617, 6631-6635,
-and the single port 20021 (no listener there currently); UDP 6601-6612 (i.e.
-the list's 6602-6612). Not covered by any concrete rule and no listener
-present either — TCP 88, 8080, 8088, all of
-16601/16603-16605/16607-16609/16611, and 20000-21000/30000-31000 besides
-20021; UDP 20000-21000 and 30000-31000 in full. Two edge cases: TCP 2121 has
-a listener (CMSV6 FTPd) but only the ambiguous `GPSFtpd` Any-program rule,
-no concrete port rule; TCP 6630 has a listener but sits just outside
-`GPS services TCP`'s `6631-6635`.
+**IPRSV1-13 (31.08.2026): decision by Максим — open the full requested list,
+overlap with the dynamic port range accepted.** He was shown the risk first
+(list entries `16601`, `16603-16605`, `16607-16609`, `16611`, `20000-21000`,
+`30000-31000` fall inside this machine's 9000-64999 ephemeral range — see
+"Dynamic port range" below — so a future reboot could land a listening
+`svchost`/`gps*` process on one of them under an already-open port) and chose
+to accept it rather than withhold those entries, verbatim in the task chat:
+«открывай все что я попросил неважно сидит там кто-то или нет». The two
+rules above were created exactly as specified — full normalized list,
+`-Profile Any -RemoteAddress Any -Program Any`. The dynamic port range itself
+was **not** changed (still 9000-64999) — narrowing it back to the 49152
+default was a separate option that was not chosen.
+
+Coverage measured **before** this task (list vs. the rules above and a live
+listener snapshot, both now superseded by the two new rules): open — TCP 80,
+443, 2122-2162, 6601-6612, 6617, 6631-6635, and the single port 20021 (no
+listener there at the time); UDP 6601-6612 (i.e. the list's 6602-6612). Not
+covered by any concrete rule and no listener present either — TCP 88, 8080,
+8088, all of 16601/16603-16605/16607-16609/16611, and
+20000-21000/30000-31000 besides 20021; UDP 20000-21000 and 30000-31000 in
+full. Two edge cases: TCP 2121 had a listener (CMSV6 FTPd) but only the
+ambiguous `GPSFtpd` Any-program rule, no concrete port rule; TCP 6630 had a
+listener but sat just outside `GPS services TCP`'s `6631-6635`.
+
+Verified **after** the change: external TCP connect from the runner succeeds
+for the list's ports that already had a listener (2121, 6605, 6617, 6630,
+6632). Ports with a rule but no listener (88, 8080, 8088, the 16xxx block,
+and most of 20000-21000/30000-31000) don't answer from outside — expected,
+not a failure; for those the rule's existence is the only evidence. UDP is
+not checked externally at all — no responder on the other end means no way
+to tell "open" from "closed" that way.
 
 ### Dynamic port range
 
@@ -163,9 +190,24 @@ Verified 31.08.2026 (IPRSV1-13): `netsh int ipv4 show dynamicport tcp` and
 `netsh int ipv4 show dynamicport udp` both report **Start Port 9000, Number
 of Ports 56000** — i.e. ports **9000-64999** are Windows' ephemeral range on
 this machine for both protocols, not the platform default of 49152-65535.
-Any future inbound firewall rule touching that span needs the same check
-IPRSV1-13 did first: it may unintentionally expose local outbound
-connections' source ports to the internet.
+IPRSV1-13 did **not** change this range — Максим was shown the overlap with
+six of the requested port-list entries and chose to open them anyway rather
+than narrow the range (see "Firewall" above).
+
+The actual risk of an inbound-allow rule landing inside this range is **not**
+that it exposes an outbound connection's own ephemeral source port — an
+inbound allow rule doesn't do that: an outbound socket is bound by its own
+5-tuple, and a stranger's unsolicited SYN to that local port simply doesn't
+match any connection and is dropped. The real risk is an ephemerally
+**listening** socket coming up inside the range later, e.g. after a reboot,
+landing on a port this range now permits inbound. Measured 31.08.2026: TCP
+49664-49670 is currently held by `lsass`/`wininit`/`services`/`spoolsv`/
+`svchost`, and roughly a dozen UDP ports in 33019-61300 by
+`gps*`/`nginx`/`svchost` — none of that is fixed or guaranteed to reuse the
+same ports next time. Any future inbound firewall rule touching 9000-64999
+needs the same check IPRSV1-13 did: measure the range and the current
+listeners first, and treat anything that later starts listening inside an
+already-open range as an accepted, not a new, exposure.
 
 ## Web entry points (80 / 443)
 
@@ -288,29 +330,46 @@ Config `C:\frps\frps.ini`, INI format only (this build does not understand
 TOML/YAML). Verified 31.08.2026:
 
 ```ini
-bind_port = 7000            # frpc clients connect here
-vhost_http_port = 9966      # device subdomains are served here
+bind_port = 7000
+vhost_http_port = 9966
 vhost_https_port = 9967
-dashboard_addr = 0.0.0.0    # reachable from the internet
-dashboard_port = 7500
-dashboard_user = admin
-dashboard_passwd = ...      # see the gotcha below — this key does nothing
-token = ...
 subdomain_host = scanvision.online
 tcp_mux = true
+dashboard_addr = 127.0.0.1
+dashboard_port = 7500
+dashboard_user = admin
+# frps 0.17.0: dashboard_pwd only, dashboard_passwd is silently ignored
+dashboard_pwd = ...
+token = ...
+allow_ports = 65535
+max_ports_per_client = 1
 log_file = C:/frps/frps-run.log
 log_way = file
 log_level = info
-log_max_days = 7
+log_max_days = 30
 ```
 
-- 🔴 **`dashboard_passwd` is not a valid key for frps 0.17.0 — it only knows
-  `dashboard_pwd`.** The unknown key is silently ignored, so the dashboard is
-  currently running with the **default `admin`/`admin`** credentials while
-  `dashboard_addr = 0.0.0.0` and firewall rule `GPS services TCP 2` expose port
-  7500 to the internet, over plain HTTP. Fixing the key (or closing 7500) is a
-  decision for Максим, not done here. Until then, treat the frps token as
-  readable by anyone who finds the dashboard.
+- ⚠️ **`dashboard_passwd` is not a valid key for frps 0.17.0 — it only knows
+  `dashboard_pwd`.** This is a permanent trap, not a one-time bug: the
+  vendor's own example configs use `dashboard_passwd`, and this build's parser
+  silently ignores an unknown key instead of erroring. That exact mistake is
+  what left the dashboard on the default `admin`/`admin` for weeks — if the
+  wrong key ever comes back (a future rewrite, a copy from a vendor example),
+  the dashboard reverts to `admin`/`admin` with no error at all. Always check
+  the key actually present is `dashboard_pwd`.
+- **Closed since 31.08.2026 (IPRSV1-16):** `dashboard_addr = 127.0.0.1` and
+  firewall rule `GPS services TCP 2` no longer includes 7500 — the dashboard
+  is unreachable from the internet. Reach it only from the machine itself or
+  through an SSH tunnel: `ssh -i ~/.ssh/id_ed25519 -N -L 7500:127.0.0.1:7500
+  Administrator@$SERVER`. `admin`/`admin` now gets `401`.
+- **What this build's dashboard actually exposes** — checked against upstream
+  `v0.17.0` source, not assumed: read-only routes only (`/api/serverinfo`,
+  per-protocol proxy lists, `/api/proxy/traffic/:name`, static UI), no route
+  returns the `token`. `/api/serverinfo` gives version, `subdomain_host`,
+  port/timeout config and traffic counters; the proxy-list routes give the
+  registered proxy **names, which are recorder Device IDs**, plus traffic.
+  So the real exposure while it sat open was version, `subdomain_host`, the
+  list of connected Device IDs and traffic volumes — not the token.
 - `log_file` must use forward slashes — a backslash path breaks the vendor
   logger's config parsing (`\U` in `Users` read as an invalid escape) and frps
   exits immediately without writing a log line.
@@ -322,48 +381,125 @@ log_max_days = 7
   from an SSH session starts a second instance that fights the first for 7000
   and dies with the session.
 - Config backups: `frps.ini.bak-20260814`, `frps.ini.bak-before-dash`,
-  `frps.ini.bak-before-dash0`.
+  `frps.ini.bak-before-dash0`, `frps.ini.bak-before-iprsv1-16` (31.08.2026 —
+  holds the pre-rotation `token` and the old `dashboard_passwd`/
+  `dashboard_addr = 0.0.0.0`; restore it over `frps.ini` and restart the
+  `frps` task to roll back this change).
 
-### ✅ Current state: frps is UP and self-healing (IPRSV1-14, fixed 31.08.2026)
+### Token rotation (31.08.2026, IPRSV1-16)
 
-frps was down from **17.08.2026 20:16** to **31.08.2026 16:01** (raised by
-hand via `schtasks /run /tn frps` as part of IPRSV1-14). Measured after the
-fix, 31.08.2026 ~16:30:
+`token` and `dashboard_pwd` were rotated in the same edit that closed the
+dashboard, in one restart — the old token had sat reachable in plaintext over
+HTTP for weeks, so it's treated as burned regardless of whether anyone
+actually read it.
+
+- the new value lives only in `C:\frps\frps.ini` — read it over SSH, never
+  copy it anywhere else: `Select-String -Path C:\frps\frps.ini -Pattern
+  '^token'`;
+- the previous value survives only in `C:\frps\frps.ini.bak-before-iprsv1-16`
+  (rollback copy, see above).
+
+**Hard cutover** — 0.17.0 has exactly one token, no transition period. Every
+recorder and every operator's CMSV6 client still holding the old token fails
+frps authorization the instant the new config went live. Field checklist
+(a human does this — there is no access from this server to recorder or
+operator machines):
+
+1. read the new token over SSH as above;
+2. on every recorder and every operator machine, update **both**
+   `C:\Program Files (x86)\CMSV6\config\frpc.ini` and
+   `...\CMSV6\plugin\config\libconfig_<FactoryType>\frpcSet.xml` (element
+   `<TokenForCon>`);
+3. restart the CMSV6 client on each machine;
+4. confirm through the SSH-tunnel dashboard that proxies (`/api/proxy/http`)
+   reappear, named by Device ID.
+
+Until step 2 is done everywhere, **no recorder will show up in the
+dashboard** — that is the expected result of the rotation, not a bug in this
+change. Rollback: restore `C:\frps\frps.ini.bak-before-iprsv1-16` over
+`frps.ini` and restart the `frps` scheduled task.
+
+### Restored hardening: allow_ports / max_ports_per_client / log_max_days
+
+`allow_ports = 65535`, `max_ports_per_client = 1` and `log_max_days = 30` were
+set by the 31.07.2026 hardening (IPRSV1-9) and silently lost when the
+14.08.2026 port rework rewrote `frps.ini` from scratch. Restored 31.08.2026
+(IPRSV1-16) — **whoever edits `frps.ini` next must carry these three keys
+forward too**; this file is hand-edited each time, not generated from a
+template that would preserve them automatically.
+
+- 0.17.0's only access control is the single shared `token` — there are no
+  per-client ACLs or per-proxy allowlists, so `allow_ports`/
+  `max_ports_per_client` are the one limit available on what a valid token
+  can do;
+- CMSV6 is unaffected by `max_ports_per_client = 1` — checked against
+  upstream source (`server/proxy.go`), not assumed: `usedPortsNum` is
+  incremented only for `TcpProxyConf`/`UdpProxyConf`. A recorder's
+  `subdomain`-based proxy is an `HttpProxyConf`, which never increments it, so
+  `server/control.go`'s `RegisterProxy` comparison against
+  `max_ports_per_client` never trips for CMSV6 traffic.
+
+### ✅ Current state: frps is UP, self-healing, dashboard closed (as of 31.08.2026)
+
+Two independent tasks changed this server within the same hour, in this
+order — kept straight here because their timestamps otherwise look
+contradictory:
+
+1. **16:01, IPRSV1-14** raised frps by hand (`schtasks /run /tn frps`) after
+   the 17.08.2026 20:16 outage (cause investigated below) and fixed the
+   scheduled task so a stop like that can't repeat unnoticed (mechanism in
+   "Как frps теперь присматривается" below).
+2. **~16:37–16:42, still IPRSV1-14** killed `frps.exe` twice in a row to test
+   the new auto-recovery (results below). This is what IPRSV1-16 independently
+   observed a few minutes later as "task already `Running`, `LastRunTime`
+   16:42:42" before it had touched anything — not an unexplained restart,
+   just IPRSV1-14's own second recovery cycle finishing.
+3. **16:45:53–16:46, IPRSV1-16** rewrote `frps.ini` (dashboard bound to
+   `127.0.0.1`, `token`/`dashboard_pwd` rotated) and restarted the task to
+   apply it. That restart produced the `frps.exe` process still running now.
+
+**Measured by IPRSV1-14, before IPRSV1-16's restart:**
 
 - one `frps.exe` process, all four ports (7000, 9966, 9967, 7500) listening
   and owned by the same PID;
-- from outside: 7000/9966/9967 accept connections; `:7500` (the dashboard)
-  times out — as of 31.08.2026 ~16:45 it is no longer reachable externally at
-  all, because two parallel tasks on this same server tightened it in the same
-  window: IPRSV1-13 dropped port 7500 from firewall rule `GPS services TCP 2`,
-  and IPRSV1-16 rebound `dashboard_addr` from `0.0.0.0` to `127.0.0.1` in
-  `frps.ini` (confirmed on the machine: the file's own `LastWriteTime` is
-  31.08.2026 16:45:53, minutes before this task's own fix). Not a regression
-  from this task — this task does not touch `frps.ini` or firewall rules (see
-  "Не трогать") and did not revert either change. A made-up subdomain on
-  `:9966` returns **404 from frps** (vhost routing works end to end,
-  independent of any registered device, and independent of the dashboard) —
-  that is what actually satisfies this task's own external-reachability
-  criterion now that `:7500` is intentionally closed;
-- no `frpc` client re-registered in the 30 minutes after the raise — the log's
-  last `client login`/`proxy listen` lines are still the 17.08.2026 ones for
-  device `900000400273`. Expected: `frpc` runs on the recorder, not on this
-  server (see "How a recorder is reached" below) — the 404 check above is
-  what actually proves the fix, not a live client;
-- killed `frps.exe` twice in a row to test auto-recovery: both times the task
-  instance registered as completed (return code `4294967295`, i.e.
-  "terminated externally" — Task Scheduler does not treat that as an action
-  *failure*, so `RestartOnFailure` never fired for either kill) and frps came
-  back only via the new 5-minute repeating trigger, in **252 s** and **267 s**
-  respectively (~4–4.5 min — under the 5 min target both times, but with less
-  margin than "RestartOnFailure" alone would give for a genuine crash). One
-  earlier, non-clean attempt — killing an instance that had been started by a
-  manual `schtasks /run` while several diagnostic SSH sessions were querying
-  the task at the same time — left a stale task instance stuck in `Running`
-  for **9+ minutes**, with `IgnoreNew` blocking every retry until that
-  instance's own wrapper process was killed by hand; this did not reproduce
-  in either of the two clean back-to-back tests, but it means the 5-minute
-  figure above is not a hard guarantee under all conditions.
+- killed `frps.exe` twice in a row: both times the task instance registered
+  as completed (return code `4294967295`, i.e. "terminated externally" — Task
+  Scheduler does not treat that as an action *failure*, so `RestartOnFailure`
+  never fired for either kill) and frps came back only via the 5-minute
+  repeating trigger, in **252 s** and **267 s** respectively (~4–4.5 min —
+  under the 5 min target both times, but with less margin than
+  `RestartOnFailure` alone would give for a genuine crash);
+- one earlier, non-clean attempt — killing an instance that had been started
+  by a manual `schtasks /run` while several diagnostic SSH sessions were
+  querying the task at the same time — left a stale task instance stuck in
+  `Running` for **9+ minutes**, with `IgnoreNew` blocking every retry until
+  that instance's own wrapper process was killed by hand. This did not
+  reproduce in either of the two clean back-to-back tests, but it is a real
+  gap: `IgnoreNew` + no `ExecutionTimeLimit` means a task stuck `Running`
+  with no live `frps.exe` behind it blocks recovery forever, silently — the
+  exact failure mode this task exists to close. Closed by `frps-watchdog`,
+  see "Как frps теперь присматривается" below.
+
+**Measured after IPRSV1-16's restart (still true):**
+
+- `frps.exe` running, exactly one process, brought up by
+  `Start-ScheduledTask -TaskName 'frps'` at 31.08.2026 16:46;
+- fresh `frps-run.log` lines: `frps tcp listen on 0.0.0.0:7000`, `http service
+  listen on 0.0.0.0:9966`, `https service listen on 0.0.0.0:9967`,
+  **`Dashboard listen on 127.0.0.1:7500`**, `Start frps success`;
+- externally: 7000/9966/9967 accept connections; `:7500` times out — closed on
+  purpose (IPRSV1-16's firewall-rule and `dashboard_addr` change above), not a
+  regression from IPRSV1-14, which never touches `frps.ini` or firewall rules.
+  A made-up subdomain on `:9966` still returns **404 from frps** — vhost
+  routing works end to end and does not depend on the dashboard, which is
+  what actually satisfies IPRSV1-14's own external-reachability criterion now
+  that `:7500` is intentionally closed;
+- `http://scanvision.online/` and `https://scanvision.online/` both `200`;
+- `Get-NetTCPConnection -State Listen -LocalPort 7500` shows only
+  `127.0.0.1`;
+- no `frpc` client has re-registered since — expected, see "Token rotation"
+  above: every recorder's `frpc.ini`/`frpcSet.xml` still holds the
+  pre-rotation token until a human updates it.
 
 **17.08.2026 20:16 stop — cause still not established.** Evidence taken
 31.08.2026 before any change (saved on the machine as
@@ -398,18 +534,37 @@ of it is excluded.
 
 ### Как frps теперь присматривается (since 31.08.2026)
 
-- `C:\frps\run-frps.bat` is now idempotent, same pattern as
-  `C:\nginx\run_nginx.bat`: a `tasklist` check exits immediately if
-  `frps.exe` is already running, otherwise it starts it in the foreground.
-  Old version backed up on the machine as `run-frps.bat.bak-2026-08-31`.
-- Task `frps`: `<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>` (no limit any
-  more), two triggers — at startup, and every 5 minutes with no end —
+- `C:\frps\run-frps.bat` is idempotent, same pattern as `C:\nginx\run_nginx.bat`:
+  a `tasklist` check exits immediately if `frps.exe` is already running,
+  otherwise it starts it in the foreground. Old version backed up on the
+  machine as `run-frps.bat.bak-2026-08-31`.
+- Task `frps`: `<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>` (no limit),
+  two triggers — at startup, and every 5 minutes with no end —
   `MultipleInstances IgnoreNew`, `RestartOnFailure` 1 min × 3, principal
   unchanged (`SYSTEM`, `HighestAvailable`). Action unchanged, still
   `C:\frps\run-frps.bat`.
-- `Microsoft-Windows-TaskScheduler/Operational` is now enabled (20 MB, was
+- `Microsoft-Windows-TaskScheduler/Operational` is enabled (20 MB, was
   disabled before 31.08.2026) — next time frps stops, that channel and
   `C:\frps\frps-run.log` are the first two places to look.
+- **`frps-watchdog` (added during IPRSV1-14 review round 1, 31.08.2026):** a
+  second scheduled task, `C:\frps\frps-watchdog.ps1`, SYSTEM/HighestAvailable,
+  `IgnoreNew`, running every 5 minutes offset from `frps`'s own trigger, with
+  its own bounded `ExecutionTimeLimit = PT5M` (unlike `frps`'s `PT0S`,
+  because this action is always meant to finish in seconds). It closes the
+  gap found above: `IgnoreNew` treats "task instance registered as `Running`"
+  as reason enough to skip a retry, whether or not `frps.exe` is actually
+  alive — so a stuck/zombie instance (observed once, 9+ minutes, above)
+  silently blocks every future 5-minute recovery attempt forever. The script:
+  if `Get-Process frps` finds a live process, it exits immediately and
+  touches nothing (verified manually against the live process, 31.08.2026 —
+  true no-op); otherwise, if the `frps` task's own `State` is still `Running`
+  with no process behind it, it calls `Stop-ScheduledTask -TaskName frps` to
+  clear the zombie and then `schtasks /run /tn frps` for an immediate retry
+  instead of waiting out the remainder of the 5-minute window. The
+  zombie-clearing branch is reasoned through and only exercised read-only so
+  far — forcing a real stuck instance to test it means another live outage,
+  and the healthy-path behavior above already has two clean back-to-back real
+  recovery tests from before this task existed.
 
 ### How a recorder is reached
 
@@ -437,6 +592,10 @@ of it is excluded.
   over SSH when configuring a client; never write its value anywhere outside
   `frps.ini`. None of this exists on the server — it only runs the CMSV6
   *server* component.
+- **Since the 31.08.2026 token rotation (IPRSV1-16):** any recorder or
+  operator CMSV6 client still holding the pre-rotation token fails frps
+  authorization and registers no proxy — see `### Token rotation` above for
+  the field update and rollback procedure.
 
 ### ⏰ Open issue: "Accessing FRPS timeout is not responding!"
 
