@@ -121,7 +121,9 @@ for port 443. Do not recreate it; `nginx_run` is the only one.
 Verified 31.08.2026. The `frps-*` per-port rules documented here previously no
 longer exist; the frps ports are now covered by one CMSV6-style rule:
 
-- `GPS services TCP 2` — TCP **7000, 9966, 9967, 7500, 20021, 22**
+- `GPS services TCP 2` — TCP **7000, 9966, 9967, 20021, 22** (7500 removed
+  31.08.2026, IPRSV1-16 — the frps dashboard on that port is no longer
+  exposed, see `## frps` below)
 - `nginx 80` — TCP 80 (the listener behind it is CMSV6's tomcat, not nginx)
 - `nginx 443` — TCP 443
 - `OpenSSH Server (sshd)` — TCP 22
@@ -251,26 +253,43 @@ TOML/YAML). Verified 31.08.2026:
 bind_port = 7000            # frpc clients connect here
 vhost_http_port = 9966      # device subdomains are served here
 vhost_https_port = 9967
-dashboard_addr = 0.0.0.0    # reachable from the internet
-dashboard_port = 7500
-dashboard_user = admin
-dashboard_passwd = ...      # see the gotcha below — this key does nothing
-token = ...
 subdomain_host = scanvision.online
 tcp_mux = true
+dashboard_addr = 127.0.0.1  # closed to the internet since 31.08.2026 (IPRSV1-16)
+dashboard_port = 7500
+dashboard_user = admin
+# frps 0.17.0: dashboard_pwd only, dashboard_passwd is silently ignored
+dashboard_pwd = ...          # rotated 31.08.2026, see below
+token = ...                  # rotated 31.08.2026, see below
+allow_ports = 65535
+max_ports_per_client = 1
 log_file = C:/frps/frps-run.log
 log_way = file
 log_level = info
-log_max_days = 7
+log_max_days = 30
 ```
 
-- 🔴 **`dashboard_passwd` is not a valid key for frps 0.17.0 — it only knows
-  `dashboard_pwd`.** The unknown key is silently ignored, so the dashboard is
-  currently running with the **default `admin`/`admin`** credentials while
-  `dashboard_addr = 0.0.0.0` and firewall rule `GPS services TCP 2` expose port
-  7500 to the internet, over plain HTTP. Fixing the key (or closing 7500) is a
-  decision for Максим, not done here. Until then, treat the frps token as
-  readable by anyone who finds the dashboard.
+- ⚠️ **`dashboard_passwd` is not a valid key for frps 0.17.0 — it only knows
+  `dashboard_pwd`.** This is a permanent trap, not a one-time bug: the
+  vendor's own example configs use `dashboard_passwd`, and this build's parser
+  silently ignores an unknown key instead of erroring. That exact mistake is
+  what left the dashboard on the default `admin`/`admin` for weeks — if the
+  wrong key ever comes back (a future rewrite, a copy from a vendor example),
+  the dashboard reverts to `admin`/`admin` with no error at all. Always check
+  the key actually present is `dashboard_pwd`.
+- **Closed since 31.08.2026 (IPRSV1-16):** `dashboard_addr = 127.0.0.1` and
+  firewall rule `GPS services TCP 2` no longer includes 7500 — the dashboard
+  is unreachable from the internet. Reach it only from the machine itself or
+  through an SSH tunnel: `ssh -i ~/.ssh/id_ed25519 -N -L 7500:127.0.0.1:7500
+  Administrator@$SERVER`. `admin`/`admin` now gets `401`.
+- **What this build's dashboard actually exposes** — checked against upstream
+  `v0.17.0` source, not assumed: read-only routes only (`/api/serverinfo`,
+  per-protocol proxy lists, `/api/proxy/traffic/:name`, static UI), no route
+  returns the `token`. `/api/serverinfo` gives version, `subdomain_host`,
+  port/timeout config and traffic counters; the proxy-list routes give the
+  registered proxy **names, which are recorder Device IDs**, plus traffic.
+  So the real exposure while it sat open was version, `subdomain_host`, the
+  list of connected Device IDs and traffic volumes — not the token.
 - `log_file` must use forward slashes — a backslash path breaks the vendor
   logger's config parsing (`\U` in `Users` read as an invalid escape) and frps
   exits immediately without writing a log line.
@@ -282,30 +301,87 @@ log_max_days = 7
   from an SSH session starts a second instance that fights the first for 7000
   and dies with the session.
 - Config backups: `frps.ini.bak-20260814`, `frps.ini.bak-before-dash`,
-  `frps.ini.bak-before-dash0`.
+  `frps.ini.bak-before-dash0`, `frps.ini.bak-before-iprsv1-16` (31.08.2026 —
+  holds the pre-rotation `token` and the old `dashboard_passwd`/
+  `dashboard_addr = 0.0.0.0`; restore it over `frps.ini` and restart the
+  `frps` task to roll back this change).
 
-### 🔴 Current state: frps is DOWN (as of 31.08.2026)
+### Token rotation (31.08.2026, IPRSV1-16)
 
-Measured, not guessed:
+`token` and `dashboard_pwd` were rotated in the same edit that closed the
+dashboard, in one restart — the old token had sat reachable in plaintext over
+HTTP for weeks, so it's treated as burned regardless of whether anyone
+actually read it.
 
-- no `frps.exe` process, and nothing listens on 7000 / 9966 / 9967 / 7500;
-- from outside, `http://scanvision.online:9966/` and
-  `http://<SERVER>:7500/` both time out;
-- the last line in `frps-run.log` is **17.08.2026 20:16:05**;
-- scheduled task `frps` is `Ready`/enabled, `LastRunTime` 14.08.2026 20:52:52,
-  `LastTaskResult` **267014** (`0x41306`, "last run terminated by user").
+- the new value lives only in `C:\frps\frps.ini` — read it over SSH, never
+  copy it anywhere else: `Select-String -Path C:\frps\frps.ini -Pattern
+  '^token'`;
+- the previous value survives only in `C:\frps\frps.ini.bak-before-iprsv1-16`
+  (rollback copy, see above).
 
-So frps ran from 14.08 until 17.08 20:16 and then stopped, and nothing brought
-it back — the task's trigger is "at system startup" and the machine has not
-rebooted since (last boot 04.08.2026). **The cause of the stop is not
-established**: the log ends with ordinary `Accept new mux stream error: broken
-pipe` warnings, no panic and no shutdown line. Do not write down a cause until
-one is actually observed — to catch the next one, add a repeat/restart trigger
-to the task or watch the Windows event log for the process exit.
+**Hard cutover** — 0.17.0 has exactly one token, no transition period. Every
+recorder and every operator's CMSV6 client still holding the old token fails
+frps authorization the instant the new config went live. Field checklist
+(a human does this — there is no access from this server to recorder or
+operator machines):
 
-**Consequence while it is down:** no in-vehicle recorder is reachable through
-`<devid>.scanvision.online:9966`, and the CMSV6 desktop client's FRPS features
-cannot work at all.
+1. read the new token over SSH as above;
+2. on every recorder and every operator machine, update **both**
+   `C:\Program Files (x86)\CMSV6\config\frpc.ini` and
+   `...\CMSV6\plugin\config\libconfig_<FactoryType>\frpcSet.xml` (element
+   `<TokenForCon>`);
+3. restart the CMSV6 client on each machine;
+4. confirm through the SSH-tunnel dashboard that proxies (`/api/proxy/http`)
+   reappear, named by Device ID.
+
+Until step 2 is done everywhere, **no recorder will show up in the
+dashboard** — that is the expected result of the rotation, not a bug in this
+change. Rollback: restore `C:\frps\frps.ini.bak-before-iprsv1-16` over
+`frps.ini` and restart the `frps` scheduled task.
+
+### Restored hardening: allow_ports / max_ports_per_client / log_max_days
+
+`allow_ports = 65535`, `max_ports_per_client = 1` and `log_max_days = 30` were
+set by the 31.07.2026 hardening (IPRSV1-9) and silently lost when the
+14.08.2026 port rework rewrote `frps.ini` from scratch. Restored 31.08.2026
+(IPRSV1-16) — **whoever edits `frps.ini` next must carry these three keys
+forward too**; this file is hand-edited each time, not generated from a
+template that would preserve them automatically.
+
+- 0.17.0's only access control is the single shared `token` — there are no
+  per-client ACLs or per-proxy allowlists, so `allow_ports`/
+  `max_ports_per_client` are the one limit available on what a valid token
+  can do;
+- CMSV6 is unaffected by `max_ports_per_client = 1` — checked against
+  upstream source (`server/proxy.go`), not assumed: `usedPortsNum` is
+  incremented only for `TcpProxyConf`/`UdpProxyConf`. A recorder's
+  `subdomain`-based proxy is an `HttpProxyConf`, which never increments it, so
+  `server/control.go`'s `RegisterProxy` comparison against
+  `max_ports_per_client` never trips for CMSV6 traffic.
+
+### ✅ Current state: frps is UP, dashboard closed (as of 31.08.2026)
+
+Measured after this task's (IPRSV1-16) restart:
+
+- `frps.exe` running, exactly one process, brought up by
+  `Start-ScheduledTask -TaskName 'frps'` at 31.08.2026 16:46;
+- fresh `frps-run.log` lines: `frps tcp listen on 0.0.0.0:7000`, `http service
+  listen on 0.0.0.0:9966`, `https service listen on 0.0.0.0:9967`,
+  **`Dashboard listen on 127.0.0.1:7500`**, `Start frps success`;
+- externally: 7000/9966/9967 accept connections, 7500 times out;
+  `http://scanvision.online/` and `https://scanvision.online/` both `200`;
+- `Get-NetTCPConnection -State Listen -LocalPort 7500` shows only
+  `127.0.0.1`.
+
+**Unexplained fact found by this task's pre-check, before its own restart:**
+the scheduled task was already `Running` with a live `frps.exe`
+(`LastRunTime` 31.08.2026 16:42:42) — contradicting the "down since
+17.08.2026 20:16" state this file recorded until now. Something restarted it
+between the last sweep and this check; **the cause is not established here**
+and is out of this task's scope — frps' startup/restart reliability belongs to
+IPRSV1-14. This task restarted it anyway, through its own normal
+`Stop-`/`Start-ScheduledTask` procedure, to apply the new config regardless of
+what was already running.
 
 ### How a recorder is reached
 
@@ -333,6 +409,10 @@ cannot work at all.
   over SSH when configuring a client; never write its value anywhere outside
   `frps.ini`. None of this exists on the server — it only runs the CMSV6
   *server* component.
+- **Since the 31.08.2026 token rotation (IPRSV1-16):** any recorder or
+  operator CMSV6 client still holding the pre-rotation token fails frps
+  authorization and registers no proxy — see `### Token rotation` above for
+  the field update and rollback procedure.
 
 ### ⏰ Open issue: "Accessing FRPS timeout is not responding!"
 
