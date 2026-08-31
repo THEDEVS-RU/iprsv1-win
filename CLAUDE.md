@@ -258,8 +258,10 @@ service `PathName` first). It is:
 
 ### nginx
 
-`C:\nginx\conf\nginx.conf` (verified 31.08.2026) has **two** `server` blocks,
-both `listen 443 ssl`, both `proxy_pass http://127.0.0.1:80`:
+`C:\nginx\conf\nginx.conf` (verified 31.08.2026) has **four** `server`
+blocks: two `listen 443 ssl` (both `proxy_pass http://127.0.0.1:80`), plus
+the two media-proxy listeners on 16605/16604 added by IPRSV1-17 (see
+"Media-under-HTTPS listeners" below). The two 443 blocks:
 
 1. `test.thedevs.ru` — Let's Encrypt cert from `C:/nginx/conf/le/`
    (`test.thedevs.ru-chain.pem` / `-key.pem`), renewed by the win-acme task.
@@ -268,16 +270,35 @@ both `listen 443 ssl`, both `proxy_pass http://127.0.0.1:80`:
    plus OCSP stapling (`ssl_stapling on`, `ssl_trusted_certificate
    scanvision-trusted.crt`, `resolver 8.8.8.8 8.8.4.4`).
 
-Both blocks set `Host`, `X-Real-IP`, `X-Forwarded-For`, `X-Forwarded-Proto`.
-There is **no** `listen 80` block (CMSV6 owns 80), no ACME webroot location,
-no HSTS and no redirect to 443 — port 80 is a first-class way in, deliberately.
+Both blocks set `Host`, `X-Real-IP`, `X-Forwarded-For`, `X-Forwarded-Proto`,
+and (added 31.08.2026, IPRSV1-15) six more directives in the same `location /`:
+`proxy_http_version 1.1;`, `proxy_set_header Upgrade $http_upgrade;`,
+`proxy_set_header Connection $connection_upgrade;`, `proxy_buffering off;`,
+`proxy_read_timeout 3600s;`, `proxy_send_timeout 3600s;`. There is **no**
+`listen 80` block (CMSV6 owns 80), no ACME webroot location, no HSTS and no
+redirect to 443 — port 80 is a first-class way in, deliberately.
+
+`proxy_buffering off` and the 3600 s timeouts sit on the shared `location /`,
+not on a dedicated `location /ws/` — deliberately: CMSV6 has two known ws
+paths (`/ws/webSocket/index/1`, `/ws/webSocket/down/1`) but that list comes
+from log analysis and isn't guaranteed complete, and a path outside a
+dedicated `/ws/` location would silently fall back to the default 60 s
+timeout and drop under idle. The trade-off is that ordinary HTTP traffic on
+this host now also runs unbuffered with long timeouts — accepted because
+traffic here is small (~7k requests/5 days, see `access.log` analysis below).
 
 The cert/key paths documented here before (`C:\nginx\ssl\scanvision.online-gs-*.pem`)
 are gone — `C:\nginx\ssl` does not exist any more. Config backups sit next to
 the live file: `nginx.conf.bak`, `nginx.conf.bak2`, `nginx.conf.bak-20260814`,
-`nginx.conf.bak-20260831b` (IPRSV1-17, before adding the two media-port
-listeners below; `nginx.conf.bak-20260831` — no `b` suffix — is IPRSV1-16's,
-unrelated).
+`nginx.conf.bak-20260831` (IPRSV1-15, before adding the six ws directives
+above), `nginx.conf.bak-20260831b` (IPRSV1-17, before adding the two
+media-port listeners below).
+
+At the `http {}` level: `client_max_body_size 512m;` (added 31.08.2026,
+IPRSV1-15 — see "Fixed: websockets…" below for why 512m) and a
+`map $http_upgrade $connection_upgrade { default upgrade; '' close; }` used by
+all four `location /` blocks (the two 443 blocks above and the two
+IPRSV1-17 media-proxy blocks below) for websocket upgrade.
 
 **Media-under-HTTPS listeners (IPRSV1-17, added 31.08.2026).** Two more
 `server` blocks, same cert as the `scanvision.online` 443 block, no
@@ -291,17 +312,21 @@ unrelated).
 - `listen 16604 ssl;` → `proxy_pass http://127.0.0.1:6604;` — CMSV6's
   `GPSMediaSvr` (the media server). This is where the actual `wss://` video
   stream (`clientPort` from the `/3/1` response, also +10000) lands; live
-  video, archive playback and intercom all multiplex over this one port —
-  confirmed by sweeping `MediaType`/`Type` combinations against the login
-  server, which returned the same `clientPort:6604` in every case. See
-  "CMSV6 platform config" below for why a working listener here still wasn't
-  enough on its own.
+  video and archive playback multiplex over this one port — confirmed by
+  sweeping `MediaType`/`Type` combinations against the login server, which
+  returned the same `clientPort:6604` in every case. **Intercom (PTT) is not
+  covered by that sweep** — it uses a second, runtime-assigned port handed
+  out only after a successful ptt-login (`B4(...)` in `cmsv6player.min.js`),
+  so whether it also lands on 6604 is unmeasured, not confirmed. See "CMSV6
+  platform config" below for why a working listener here still wasn't enough
+  on its own.
 - If DevTools ever shows a PTT `wss://` connection on a port other than
-  16604/16605 (the intercom's second, runtime-assigned port — see "CMSV6
-  platform config"), add the identical pattern for it: nginx listener at
-  `port+10000`, firewall port, and an entry in the `HttpsMapHttpPort` map.
+  16604/16605 (the intercom's second, runtime-assigned port, unmeasured — see
+  above), add the identical pattern for it: nginx listener at `port+10000`,
+  firewall port, and an entry in the `HttpsMapHttpPort` map.
 
-- 🔴 **Missing websocket proxying — see "Known issue" below.**
+- ✅ **Websocket proxying — fixed 31.08.2026, see "Fixed: websockets now
+  survive the 443 proxy" below.**
 - **Reload gotcha:** `nginx.exe -s reload` only works when run by the account
   that started the master process. The scheduled task runs nginx as `SYSTEM`,
   so a reload from an interactive SSH session (running as `Administrator`)
@@ -763,35 +788,77 @@ connects only to 6601/6603/6607 and to the CMSV6 web port — it never touches
 step is packet-level capture on the operator's machine, not more guessing on
 the server.
 
-## 🔴 Known issue: websockets do not survive the 443 proxy
+## ✅ Fixed: websockets now survive the 443 proxy (31.08.2026, IPRSV1-15)
 
-Reproduced 31.08.2026 from outside, same request, two ports:
+**Before**, reproduced 31.08.2026 13:00 UTC from outside, same request, two ports:
 
 | Request | Result |
 |---|---|
 | `https://scanvision.online/ws/webSocket/index/1` with `Upgrade: websocket` | **404** |
 | `http://scanvision.online/ws/webSocket/index/1` with `Upgrade: websocket` | **101 Switching Protocols** |
 
-Cause (direct, from the config): the current `nginx.conf` sets no
-`proxy_http_version 1.1` and no `Upgrade`/`Connection` headers, so nginx
-downgrades the request to a plain HTTP/1.0 proxy call and tomcat answers 404.
-An earlier revision of this config had a `map $http_upgrade $connection_upgrade`
-block plus `proxy_buffering off` and 3600 s timeouts; the current file (rebuilt
-14.08.2026) does not. Also missing from `http {}`: `client_max_body_size`
-(default 1 m, so uploads over 1 MB through 443 get 413).
+Cause (direct, from the config): `nginx.conf` set no `proxy_http_version 1.1`
+and no `Upgrade`/`Connection` headers, so nginx downgraded the request to a
+plain HTTP/1.0 proxy call and tomcat answered 404. **Correction of a claim
+this file made before 31.08.2026:** there was no earlier config revision with
+`map $http_upgrade $connection_upgrade` — `findstr` over `nginx.conf.bak`,
+`.bak2` and `.bak-20260814` on 31.08.2026 found no ws directives in any of
+them (while a control search for `proxy_pass` matched all three, so the files
+do get read), so the fix below is an addition, not a restore. Also missing
+from `http {}`: `client_max_body_size` (default 1 m, so uploads over 1 MB
+through 443 got 413).
+
+**Fix applied 31.08.2026 (IPRSV1-15):** backed up the live config to
+`nginx.conf.bak-20260831`, then added at the `http {}` level
+`map $http_upgrade $connection_upgrade { default upgrade; '' close; }` and
+`client_max_body_size 512m;`, and in both `location /` blocks:
+`proxy_http_version 1.1;`, `proxy_set_header Upgrade $http_upgrade;`,
+`proxy_set_header Connection $connection_upgrade;`, `proxy_buffering off;`,
+`proxy_read_timeout 3600s;`, `proxy_send_timeout 3600s;`. Applied via
+`taskkill /F /IM nginx.exe` + `schtasks /run /tn nginx_run` (the only way to
+apply a config change, see "Reload gotcha" above) — verified no orphaned
+master afterwards.
+
+`512m` is deliberate, not arbitrary: CMSV6's own upload ceiling is 500 MB
+(`web.xml`'s `<max-file-size>524288000</max-file-size>`,
+`struts.properties`'s `struts.multipart.maxFileSize=524288000`, connector
+`maxPostSize="-1"`), so nginx's limit sits just above the application's, kept
+as the gate.
+
+**After**, verified 31.08.2026 from outside, same request as above:
+
+| Request | Result |
+|---|---|
+| `https://scanvision.online/ws/webSocket/index/1` | **101**, `Sec-WebSocket-Accept` present |
+| `https://scanvision.online/ws/webSocket/down/1` | **101** |
+| `https://test.thedevs.ru/ws/webSocket/index/1` | **101** |
+| `http://scanvision.online/ws/webSocket/index/1` and `/down/1` | still **101** — port 80 behaviour unchanged |
+| `https://scanvision.online/` and `https://test.thedevs.ru/` | **200**, cert chain valid — plain HTTPS unaffected |
+| POST 2 000 000 bytes to `https://scanvision.online/` | full body reached the backend (`size_upload=2000000`, no 413); response now byte-identical to the same POST over `http://` |
 
 Effect: CMSV6's main-interface sockets (`/ws/webSocket/index/1`,
-`/ws/webSocket/down/1`) work over `http://` and fail over `https://`. Not yet
-fixed — the fix is four lines in each `location /`, but it needs an nginx
-restart on a live platform, so it is Максим's call.
+`/ws/webSocket/down/1`) now work over both `http://` and `https://`.
 
-Separately, and unchanged: the **video stream never goes through nginx at all**.
-Five days of `access.log` (31.07–03.08.2026, ~7k real requests) show the
-player's pages and scripts loading through the proxy (`ttxvideo-h5.html`,
+The remaining acceptance criterion — the main CMSV6 interface at
+`https://scanvision.online/` visibly updating data in real time — is a
+by-eye browser check, not something scriptable from here; it is left to
+Максим to confirm. The `101`/byte-identical-body checks above cover the
+protocol-level behaviour the browser check would rely on.
+
+Separately, and unchanged: the **video stream never goes through nginx at
+all** over plain `http://` — the player connects straight to CMSV6's media
+port (`ws://<ip>:6604`), because the API hands out absolute addresses; five
+days of `access.log` (31.07–03.08.2026, ~7k real requests) show the player's
+pages and scripts loading through the proxy (`ttxvideo-h5.html`,
 `video-replay.html`, `ttxplayer-h5.js`, `cmsv6player.min.js`) but no
 `flv`/`m3u8`/`hls`/`mp4` request and no websocket path other than the two
-above — the stream goes straight to CMSV6's media port, because the API hands
-out absolute addresses.
+above. **Under `https:`, as of IPRSV1-17 (31.08.2026), nginx does now have a
+listener in that path** (`16604 → 127.0.0.1:6604`, see "Media-under-HTTPS
+listeners" above) — but the player still won't use it: CMSV6's own `IsHttps`
+flag stays `0`, so under `https:` pages the player keeps building `ws://`
+(not `wss://`) and the browser blocks it as mixed content before any nginx
+listener is ever reached. See "CMSV6 platform config" above for the
+exhausted-hypotheses state of that flag.
 
 ## History: 14.08.2026 port rework, rolled back the same day
 
