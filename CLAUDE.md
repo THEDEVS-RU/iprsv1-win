@@ -118,14 +118,54 @@ for port 443. Do not recreate it; `nginx_run` is the only one.
 
 ### Firewall (inbound, enabled)
 
-Verified 31.08.2026. The `frps-*` per-port rules documented here previously no
-longer exist; the frps ports are now covered by one CMSV6-style rule:
+Verified 31.08.2026, re-measured same day for IPRSV1-13. The `frps-*`
+per-port rules documented here previously no longer exist. The `CMSv6-*`-named
+rules seen on 30.07.2026 (`CMSv6-6601-6612-tcp`/`-udp`, `CMSv6-6631-6635-tcp`,
+`CMSv6-2121-2122-6617-2162-8080-tcp`) are also gone — CMSV6 has been
+reinstalled since, and the vendor now ships the same coverage under new names:
 
+- `GPS services TCP` — TCP **80, 443, 6617, 6631-6635, 2122-2162, 6601-6612**
+- `GPS services UDP` — UDP **6601-6612**
 - `GPS services TCP 2` — TCP **7000, 9966, 9967, 7500, 20021, 22**
 - `nginx 80` — TCP 80 (the listener behind it is CMSV6's tomcat, not nginx)
 - `nginx 443` — TCP 443
 - `OpenSSH Server (sshd)` — TCP 22
-- the vendor's `GPSNginx`/`GPS *` rules — protocol Any, left untouched
+- the vendor's `GPSNginx`/`GPS *` rules (`GPSLoginSvr`, `GPSGatewaySvr`,
+  `GPSMediaSvr`, `GPSUserSvr`, `GPSDownSvr`, `GPSServerControl`,
+  `GPSStorageSvr`, `GPSTomcat`, `GPSFtpd`, `GPSGeocodeSvr`, `GPSRedisd`) —
+  protocol Any, scoped by program rather than port, left untouched; their
+  actual port coverage cannot be read from the firewall alone.
+
+🔴 **IPRSV1-13 (31.08.2026): two consolidated rules were planned
+(`iprsv1-13-ports-tcp` TCP, `iprsv1-13-ports-udp` UDP, covering the CMSV6
+platform's full published port list) but were NOT created — blocked, needs
+Максим's decision.** Reason: the measured Windows dynamic/ephemeral port
+range on this machine is **9000-64999** (see "Dynamic port range" below), not
+the default starting at 49152, and it overlaps several entries of that port
+list — `16601`, `16603-16605`, `16607-16609`, `16611`, `20000-21000`,
+`30000-31000`, for both TCP and UDP. An inbound-allow rule there would also
+expose whatever local process's ephemeral outbound source port happens to
+land in that span at any given moment, which is not what was asked for.
+Coverage measured before this task, list vs. the rules above and a live
+listener snapshot: open — TCP 80, 443, 2122-2162, 6601-6612, 6617, 6631-6635,
+and the single port 20021 (no listener there currently); UDP 6601-6612 (i.e.
+the list's 6602-6612). Not covered by any concrete rule and no listener
+present either — TCP 88, 8080, 8088, all of
+16601/16603-16605/16607-16609/16611, and 20000-21000/30000-31000 besides
+20021; UDP 20000-21000 and 30000-31000 in full. Two edge cases: TCP 2121 has
+a listener (CMSV6 FTPd) but only the ambiguous `GPSFtpd` Any-program rule,
+no concrete port rule; TCP 6630 has a listener but sits just outside
+`GPS services TCP`'s `6631-6635`.
+
+### Dynamic port range
+
+Verified 31.08.2026 (IPRSV1-13): `netsh int ipv4 show dynamicport tcp` and
+`netsh int ipv4 show dynamicport udp` both report **Start Port 9000, Number
+of Ports 56000** — i.e. ports **9000-64999** are Windows' ephemeral range on
+this machine for both protocols, not the platform default of 49152-65535.
+Any future inbound firewall rule touching that span needs the same check
+IPRSV1-13 did first: it may unintentionally expose local outbound
+connections' source ports to the internet.
 
 ## Web entry points (80 / 443)
 
