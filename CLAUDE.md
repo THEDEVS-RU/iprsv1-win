@@ -93,7 +93,9 @@ Verified 31.08.2026 unless noted.
   "Web entry points" below.
 - **frps** — reverse-proxy server, now at **`C:\frps`** (moved off
   `C:\Users\Administrator\Desktop\6e9`, which no longer exists). Version
-  **0.17.0**. See "frps" below. 🔴 **Not running as of 31.08.2026.**
+  **0.17.0**. See "frps" below. ✅ **Up, dashboard closed, as of 31.08.2026** —
+  see "Current state: frps is UP, dashboard closed" under "frps" for the
+  measurements.
 - **win-acme** — ACME client, now at **`C:\wacs`** (`C:\win-acme` no longer
   exists), win-acme 2.2.9.1701. Its scheduled task
   `win-acme renew (acme-v02.api.letsencrypt.org)` is **enabled** and healthy
@@ -255,12 +257,12 @@ vhost_http_port = 9966      # device subdomains are served here
 vhost_https_port = 9967
 subdomain_host = scanvision.online
 tcp_mux = true
-dashboard_addr = 127.0.0.1  # closed to the internet since 31.08.2026 (IPRSV1-16)
+dashboard_addr = 127.0.0.1
 dashboard_port = 7500
 dashboard_user = admin
 # frps 0.17.0: dashboard_pwd only, dashboard_passwd is silently ignored
-dashboard_pwd = ...          # rotated 31.08.2026, see below
-token = ...                  # rotated 31.08.2026, see below
+dashboard_pwd = ...
+token = ...
 allow_ports = 65535
 max_ports_per_client = 1
 log_file = C:/frps/frps-run.log
@@ -376,12 +378,14 @@ Measured after this task's (IPRSV1-16) restart:
 **Unexplained fact found by this task's pre-check, before its own restart:**
 the scheduled task was already `Running` with a live `frps.exe`
 (`LastRunTime` 31.08.2026 16:42:42) — contradicting the "down since
-17.08.2026 20:16" state this file recorded until now. Something restarted it
-between the last sweep and this check; **the cause is not established here**
-and is out of this task's scope — frps' startup/restart reliability belongs to
-IPRSV1-14. This task restarted it anyway, through its own normal
-`Stop-`/`Start-ScheduledTask` procedure, to apply the new config regardless of
-what was already running.
+17.08.2026 20:16" state this file recorded until now: the last line in
+`frps-run.log` before this task was **17.08.2026 20:16:05**, and the task's
+`LastTaskResult` was **267014** (`0x41306`, "last run terminated by user").
+Something restarted it between the last sweep and this check; **the cause is
+not established here** and is out of this task's scope — frps' startup/restart
+reliability belongs to IPRSV1-14. This task restarted it anyway, through its
+own normal `Stop-`/`Start-ScheduledTask` procedure, to apply the new config
+regardless of what was already running.
 
 ### How a recorder is reached
 
