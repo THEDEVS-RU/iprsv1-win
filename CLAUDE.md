@@ -109,7 +109,7 @@ Verified 31.08.2026 unless noted.
 | Task | Action | Notes |
 |---|---|---|
 | `nginx_run` | `C:\nginx\run_nginx.bat` | at startup, SYSTEM. The `.bat` is idempotent — it checks `tasklist` for a running `nginx.exe` and only then `cd /d C:\nginx` + `start "" nginx.exe`, so it cannot raise a second master. |
-| `frps` | `C:\frps\run-frps.bat` | at startup, SYSTEM. The `.bat` is `cd /d C:\frps` + `frps.exe -c C:\frps\frps.ini` in the foreground — when frps exits, the task ends with it. |
+| `frps` | `C:\frps\run-frps.bat` | at startup + every 5 min (repeats forever), SYSTEM. The `.bat` is idempotent (`tasklist` check, same pattern as `nginx_run`'s), the task has no `ExecutionTimeLimit`, `MultipleInstances IgnoreNew`, and restarts on failure (1 min × 3). See "frps" section below for the 17.08.2026 outage and how it's watched now. |
 | `win-acme renew (…)` | `C:\wacs\wacs.exe` | vendor task, renews `test.thedevs.ru` only. |
 
 A second, duplicate `nginx` task existed briefly on 14.08.2026 (with its own
@@ -118,14 +118,54 @@ for port 443. Do not recreate it; `nginx_run` is the only one.
 
 ### Firewall (inbound, enabled)
 
-Verified 31.08.2026. The `frps-*` per-port rules documented here previously no
-longer exist; the frps ports are now covered by one CMSV6-style rule:
+Verified 31.08.2026, re-measured same day for IPRSV1-13. The `frps-*`
+per-port rules documented here previously no longer exist. The `CMSv6-*`-named
+rules seen on 30.07.2026 (`CMSv6-6601-6612-tcp`/`-udp`, `CMSv6-6631-6635-tcp`,
+`CMSv6-2121-2122-6617-2162-8080-tcp`) are also gone — CMSV6 has been
+reinstalled since, and the vendor now ships the same coverage under new names:
 
+- `GPS services TCP` — TCP **80, 443, 6617, 6631-6635, 2122-2162, 6601-6612**
+- `GPS services UDP` — UDP **6601-6612**
 - `GPS services TCP 2` — TCP **7000, 9966, 9967, 7500, 20021, 22**
 - `nginx 80` — TCP 80 (the listener behind it is CMSV6's tomcat, not nginx)
 - `nginx 443` — TCP 443
 - `OpenSSH Server (sshd)` — TCP 22
-- the vendor's `GPSNginx`/`GPS *` rules — protocol Any, left untouched
+- the vendor's `GPSNginx`/`GPS *` rules (`GPSLoginSvr`, `GPSGatewaySvr`,
+  `GPSMediaSvr`, `GPSUserSvr`, `GPSDownSvr`, `GPSServerControl`,
+  `GPSStorageSvr`, `GPSTomcat`, `GPSFtpd`, `GPSGeocodeSvr`, `GPSRedisd`) —
+  protocol Any, scoped by program rather than port, left untouched; their
+  actual port coverage cannot be read from the firewall alone.
+
+🔴 **IPRSV1-13 (31.08.2026): two consolidated rules were planned
+(`iprsv1-13-ports-tcp` TCP, `iprsv1-13-ports-udp` UDP, covering the CMSV6
+platform's full published port list) but were NOT created — blocked, needs
+Максим's decision.** Reason: the measured Windows dynamic/ephemeral port
+range on this machine is **9000-64999** (see "Dynamic port range" below), not
+the default starting at 49152, and it overlaps several entries of that port
+list — `16601`, `16603-16605`, `16607-16609`, `16611`, `20000-21000`,
+`30000-31000`, for both TCP and UDP. An inbound-allow rule there would also
+expose whatever local process's ephemeral outbound source port happens to
+land in that span at any given moment, which is not what was asked for.
+Coverage measured before this task, list vs. the rules above and a live
+listener snapshot: open — TCP 80, 443, 2122-2162, 6601-6612, 6617, 6631-6635,
+and the single port 20021 (no listener there currently); UDP 6601-6612 (i.e.
+the list's 6602-6612). Not covered by any concrete rule and no listener
+present either — TCP 88, 8080, 8088, all of
+16601/16603-16605/16607-16609/16611, and 20000-21000/30000-31000 besides
+20021; UDP 20000-21000 and 30000-31000 in full. Two edge cases: TCP 2121 has
+a listener (CMSV6 FTPd) but only the ambiguous `GPSFtpd` Any-program rule,
+no concrete port rule; TCP 6630 has a listener but sits just outside
+`GPS services TCP`'s `6631-6635`.
+
+### Dynamic port range
+
+Verified 31.08.2026 (IPRSV1-13): `netsh int ipv4 show dynamicport tcp` and
+`netsh int ipv4 show dynamicport udp` both report **Start Port 9000, Number
+of Ports 56000** — i.e. ports **9000-64999** are Windows' ephemeral range on
+this machine for both protocols, not the platform default of 49152-65535.
+Any future inbound firewall rule touching that span needs the same check
+IPRSV1-13 did first: it may unintentionally expose local outbound
+connections' source ports to the internet.
 
 ## Web entry points (80 / 443)
 
@@ -284,28 +324,83 @@ log_max_days = 7
 - Config backups: `frps.ini.bak-20260814`, `frps.ini.bak-before-dash`,
   `frps.ini.bak-before-dash0`.
 
-### 🔴 Current state: frps is DOWN (as of 31.08.2026)
+### ✅ Current state: frps is UP and self-healing (IPRSV1-14, fixed 31.08.2026)
 
-Measured, not guessed:
+frps was down from **17.08.2026 20:16** to **31.08.2026 16:01** (raised by
+hand via `schtasks /run /tn frps` as part of IPRSV1-14). Measured after the
+fix, 31.08.2026 ~16:30:
 
-- no `frps.exe` process, and nothing listens on 7000 / 9966 / 9967 / 7500;
-- from outside, `http://scanvision.online:9966/` and
-  `http://<SERVER>:7500/` both time out;
-- the last line in `frps-run.log` is **17.08.2026 20:16:05**;
-- scheduled task `frps` is `Ready`/enabled, `LastRunTime` 14.08.2026 20:52:52,
-  `LastTaskResult` **267014** (`0x41306`, "last run terminated by user").
+- one `frps.exe` process, all four ports (7000, 9966, 9967, 7500) listening
+  and owned by the same PID;
+- from outside: `http://201.34.132.26:7500/` returns **401** (dashboard
+  reachable, auth required — the port passes `GPS services TCP 2` fine); a
+  made-up subdomain on `:9966` returns **404 from frps** (vhost routing works
+  end to end, independent of any registered device);
+- no `frpc` client re-registered in the 30 minutes after the raise — the log's
+  last `client login`/`proxy listen` lines are still the 17.08.2026 ones for
+  device `900000400273`. Expected: `frpc` runs on the recorder, not on this
+  server (see "How a recorder is reached" below) — the 404 check above is
+  what actually proves the fix, not a live client;
+- killed `frps.exe` twice in a row to test auto-recovery: both times the task
+  instance registered as completed (return code `4294967295`, i.e.
+  "terminated externally" — Task Scheduler does not treat that as an action
+  *failure*, so `RestartOnFailure` never fired for either kill) and frps came
+  back only via the new 5-minute repeating trigger, in **252 s** and **267 s**
+  respectively (~4–4.5 min — under the 5 min target both times, but with less
+  margin than "RestartOnFailure" alone would give for a genuine crash). One
+  earlier, non-clean attempt — killing an instance that had been started by a
+  manual `schtasks /run` while several diagnostic SSH sessions were querying
+  the task at the same time — left a stale task instance stuck in `Running`
+  for **9+ minutes**, with `IgnoreNew` blocking every retry until that
+  instance's own wrapper process was killed by hand; this did not reproduce
+  in either of the two clean back-to-back tests, but it means the 5-minute
+  figure above is not a hard guarantee under all conditions.
 
-So frps ran from 14.08 until 17.08 20:16 and then stopped, and nothing brought
-it back — the task's trigger is "at system startup" and the machine has not
-rebooted since (last boot 04.08.2026). **The cause of the stop is not
-established**: the log ends with ordinary `Accept new mux stream error: broken
-pipe` warnings, no panic and no shutdown line. Do not write down a cause until
-one is actually observed — to catch the next one, add a repeat/restart trigger
-to the task or watch the Windows event log for the process exit.
+**17.08.2026 20:16 stop — cause still not established.** Evidence taken
+31.08.2026 before any change (saved on the machine as
+`C:\frps\frps-task-before-2026-08-31.xml`, the rollback path):
 
-**Consequence while it is down:** no in-vehicle recorder is reachable through
-`<devid>.scanvision.online:9966`, and the CMSV6 desktop client's FRPS features
-cannot work at all.
+- the `ExecutionTimeLimit = PT72H` hypothesis previously written here is
+  **refuted**: the pre-change task XML has **no `<ExecutionTimeLimit>`
+  element at all**, not `PT72H`;
+- excluded directly by the evidence: an idle-triggered stop
+  (`<RunOnlyIfIdle>` was absent from the XML, i.e. false, so the
+  `<IdleSettings>` block present alongside it was inert); an OS-level
+  crash/power-loss/resource exhaustion around 17.08.2026 20:16 (`System` and
+  `Application` logs reach back to 02.08.2026 04:07, fully covering
+  17.08 18:00–18.08 02:00, and hold nothing but routine service start/stop
+  noise — no `Kernel-Power`, no `Resource-Exhaustion-Detector`, no
+  `Application Error`/`Application Hang` for `frps.exe`); a panic inside frps
+  itself — the log's last lines are ordinary `Accept new mux stream error:
+  broken pipe` warnings, no panic, no shutdown line;
+- can't be excluded, because no telemetry existed to check it either way: an
+  explicit `schtasks /end`/`Stop-ScheduledTask` call — the one channel that
+  would show it, `Microsoft-Windows-TaskScheduler/Operational`, was
+  **disabled** (confirmed 31.08.2026) with zero history for 14–18.08.2026,
+  now fixed (see below); the task's own
+  `<StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>` — implausible on a
+  VDS with no battery, but nothing rules it out;
+- the `Security` log's own oldest entry is 30.08.2026 20:08 (~20h retention,
+  confirming the note further down that it covers under a day) — it never
+  reached 17.08.2026, so event 4689 was never checkable either way.
+
+Do not add a cause beyond what's above — none of it is confirmed, only some
+of it is excluded.
+
+### Как frps теперь присматривается (since 31.08.2026)
+
+- `C:\frps\run-frps.bat` is now idempotent, same pattern as
+  `C:\nginx\run_nginx.bat`: a `tasklist` check exits immediately if
+  `frps.exe` is already running, otherwise it starts it in the foreground.
+  Old version backed up on the machine as `run-frps.bat.bak-2026-08-31`.
+- Task `frps`: `<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>` (no limit any
+  more), two triggers — at startup, and every 5 minutes with no end —
+  `MultipleInstances IgnoreNew`, `RestartOnFailure` 1 min × 3, principal
+  unchanged (`SYSTEM`, `HighestAvailable`). Action unchanged, still
+  `C:\frps\run-frps.bat`.
+- `Microsoft-Windows-TaskScheduler/Operational` is now enabled (20 MB, was
+  disabled before 31.08.2026) — next time frps stops, that channel and
+  `C:\frps\frps-run.log` are the first two places to look.
 
 ### How a recorder is reached
 
