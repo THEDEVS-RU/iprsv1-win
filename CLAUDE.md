@@ -93,7 +93,9 @@ Verified 31.08.2026 unless noted.
   "Web entry points" below.
 - **frps** — reverse-proxy server, now at **`C:\frps`** (moved off
   `C:\Users\Administrator\Desktop\6e9`, which no longer exists). Version
-  **0.17.0**. See "frps" below. 🔴 **Not running as of 31.08.2026.**
+  **0.17.0**. See "frps" below. Running as of 31.08.2026 (re-verified during
+  IPRSV1-13's own sweep) — the 17.08-31.08 outage documented below was fixed
+  under a separate task (IPRSV1-14), not this one.
 - **win-acme** — ACME client, now at **`C:\wacs`** (`C:\win-acme` no longer
   exists), win-acme 2.2.9.1701. Its scheduled task
   `win-acme renew (acme-v02.api.letsencrypt.org)` is **enabled** and healthy
@@ -118,44 +120,68 @@ for port 443. Do not recreate it; `nginx_run` is the only one.
 
 ### Firewall (inbound, enabled)
 
-Verified 31.08.2026, re-measured same day for IPRSV1-13. The `frps-*`
-per-port rules documented here previously no longer exist. The `CMSv6-*`-named
-rules seen on 30.07.2026 (`CMSv6-6601-6612-tcp`/`-udp`, `CMSv6-6631-6635-tcp`,
+Verified 31.08.2026, re-measured same day for IPRSV1-13 (before and after
+creating the two rules below — 100 enabled inbound allow rules before, 102
+after, no other rule touched). The `frps-*` per-port rules documented here
+previously no longer exist. The `CMSv6-*`-named rules seen on 30.07.2026
+(`CMSv6-6601-6612-tcp`/`-udp`, `CMSv6-6631-6635-tcp`,
 `CMSv6-2121-2122-6617-2162-8080-tcp`) are also gone — CMSV6 has been
 reinstalled since, and the vendor now ships the same coverage under new names:
 
 - `GPS services TCP` — TCP **80, 443, 6617, 6631-6635, 2122-2162, 6601-6612**
 - `GPS services UDP` — UDP **6601-6612**
-- `GPS services TCP 2` — TCP **7000, 9966, 9967, 7500, 20021, 22**
+- `GPS services TCP 2` — TCP **7000, 9966, 9967, 20021, 22** (port 7500 is
+  NOT in this rule, nor in any other enabled inbound rule — an earlier
+  version of this file said it was, that was wrong)
 - `nginx 80` — TCP 80 (the listener behind it is CMSV6's tomcat, not nginx)
 - `nginx 443` — TCP 443
 - `OpenSSH Server (sshd)` — TCP 22
+- `OpenSSH SSH Server Preview (sshd)` — TCP 22, a second enabled rule for the
+  same port
 - the vendor's `GPSNginx`/`GPS *` rules (`GPSLoginSvr`, `GPSGatewaySvr`,
   `GPSMediaSvr`, `GPSUserSvr`, `GPSDownSvr`, `GPSServerControl`,
   `GPSStorageSvr`, `GPSTomcat`, `GPSFtpd`, `GPSGeocodeSvr`, `GPSRedisd`) —
-  protocol Any, scoped by program rather than port, left untouched; their
+  each is a *pair* of rules, one TCP and one UDP, both with `LocalPort Any`
+  (confirmed via `Get-NetFirewallPortFilter`; not "protocol Any" as this file
+  said before) — scoped by program rather than port, left untouched; their
   actual port coverage cannot be read from the firewall alone.
+- `iprsv1-13-ports-tcp` (IPRSV1-13, created 31.08.2026) — TCP **80, 88, 443,
+  2121-2162, 6601-6612, 6617, 6630-6635, 8080, 8088, 16601, 16603-16605,
+  16607-16609, 16611, 20000-21000, 30000-31000**
+- `iprsv1-13-ports-udp` (IPRSV1-13, created 31.08.2026) — UDP **6602-6612,
+  20000-21000, 30000-31000**
 
-🔴 **IPRSV1-13 (31.08.2026): two consolidated rules were planned
-(`iprsv1-13-ports-tcp` TCP, `iprsv1-13-ports-udp` UDP, covering the CMSV6
-platform's full published port list) but were NOT created — blocked, needs
-Максим's decision.** Reason: the measured Windows dynamic/ephemeral port
-range on this machine is **9000-64999** (see "Dynamic port range" below), not
-the default starting at 49152, and it overlaps several entries of that port
-list — `16601`, `16603-16605`, `16607-16609`, `16611`, `20000-21000`,
-`30000-31000`, for both TCP and UDP. An inbound-allow rule there would also
-expose whatever local process's ephemeral outbound source port happens to
-land in that span at any given moment, which is not what was asked for.
-Coverage measured before this task, list vs. the rules above and a live
-listener snapshot: open — TCP 80, 443, 2122-2162, 6601-6612, 6617, 6631-6635,
-and the single port 20021 (no listener there currently); UDP 6601-6612 (i.e.
-the list's 6602-6612). Not covered by any concrete rule and no listener
-present either — TCP 88, 8080, 8088, all of
-16601/16603-16605/16607-16609/16611, and 20000-21000/30000-31000 besides
-20021; UDP 20000-21000 and 30000-31000 in full. Two edge cases: TCP 2121 has
-a listener (CMSV6 FTPd) but only the ambiguous `GPSFtpd` Any-program rule,
-no concrete port rule; TCP 6630 has a listener but sits just outside
-`GPS services TCP`'s `6631-6635`.
+**IPRSV1-13 (31.08.2026): decision by Максим — open the full requested list,
+overlap with the dynamic port range accepted.** He was shown the risk first
+(list entries `16601`, `16603-16605`, `16607-16609`, `16611`, `20000-21000`,
+`30000-31000` fall inside this machine's 9000-64999 ephemeral range — see
+"Dynamic port range" below — so a future reboot could land a listening
+`svchost`/`gps*` process on one of them under an already-open port) and chose
+to accept it rather than withhold those entries, verbatim in the task chat:
+«открывай все что я попросил неважно сидит там кто-то или нет». The two
+rules above were created exactly as specified — full normalized list,
+`-Profile Any -RemoteAddress Any -Program Any`. The dynamic port range itself
+was **not** changed (still 9000-64999) — narrowing it back to the 49152
+default was a separate option that was not chosen.
+
+Coverage measured **before** this task (list vs. the rules above and a live
+listener snapshot, both now superseded by the two new rules): open — TCP 80,
+443, 2122-2162, 6601-6612, 6617, 6631-6635, and the single port 20021 (no
+listener there at the time); UDP 6601-6612 (i.e. the list's 6602-6612). Not
+covered by any concrete rule and no listener present either — TCP 88, 8080,
+8088, all of 16601/16603-16605/16607-16609/16611, and
+20000-21000/30000-31000 besides 20021; UDP 20000-21000 and 30000-31000 in
+full. Two edge cases: TCP 2121 had a listener (CMSV6 FTPd) but only the
+ambiguous `GPSFtpd` Any-program rule, no concrete port rule; TCP 6630 had a
+listener but sat just outside `GPS services TCP`'s `6631-6635`.
+
+Verified **after** the change: external TCP connect from the runner succeeds
+for the list's ports that already had a listener (2121, 6605, 6617, 6630,
+6632). Ports with a rule but no listener (88, 8080, 8088, the 16xxx block,
+and most of 20000-21000/30000-31000) don't answer from outside — expected,
+not a failure; for those the rule's existence is the only evidence. UDP is
+not checked externally at all — no responder on the other end means no way
+to tell "open" from "closed" that way.
 
 ### Dynamic port range
 
@@ -163,9 +189,24 @@ Verified 31.08.2026 (IPRSV1-13): `netsh int ipv4 show dynamicport tcp` and
 `netsh int ipv4 show dynamicport udp` both report **Start Port 9000, Number
 of Ports 56000** — i.e. ports **9000-64999** are Windows' ephemeral range on
 this machine for both protocols, not the platform default of 49152-65535.
-Any future inbound firewall rule touching that span needs the same check
-IPRSV1-13 did first: it may unintentionally expose local outbound
-connections' source ports to the internet.
+IPRSV1-13 did **not** change this range — Максим was shown the overlap with
+six of the requested port-list entries and chose to open them anyway rather
+than narrow the range (see "Firewall" above).
+
+The actual risk of an inbound-allow rule landing inside this range is **not**
+that it exposes an outbound connection's own ephemeral source port — an
+inbound allow rule doesn't do that: an outbound socket is bound by its own
+5-tuple, and a stranger's unsolicited SYN to that local port simply doesn't
+match any connection and is dropped. The real risk is an ephemerally
+**listening** socket coming up inside the range later, e.g. after a reboot,
+landing on a port this range now permits inbound. Measured 31.08.2026: TCP
+49664-49670 is currently held by `lsass`/`wininit`/`services`/`spoolsv`/
+`svchost`, and roughly a dozen UDP ports in 33019-61300 by
+`gps*`/`nginx`/`svchost` — none of that is fixed or guaranteed to reuse the
+same ports next time. Any future inbound firewall rule touching 9000-64999
+needs the same check IPRSV1-13 did: measure the range and the current
+listeners first, and treat anything that later starts listening inside an
+already-open range as an accepted, not a new, exposure.
 
 ## Web entry points (80 / 443)
 
@@ -291,10 +332,10 @@ TOML/YAML). Verified 31.08.2026:
 bind_port = 7000            # frpc clients connect here
 vhost_http_port = 9966      # device subdomains are served here
 vhost_https_port = 9967
-dashboard_addr = 0.0.0.0    # reachable from the internet
+dashboard_addr = 127.0.0.1  # loopback only, NOT reachable from the internet
 dashboard_port = 7500
 dashboard_user = admin
-dashboard_passwd = ...      # see the gotcha below — this key does nothing
+dashboard_pwd = ...         # frps 0.17.0 only knows dashboard_pwd, not dashboard_passwd
 token = ...
 subdomain_host = scanvision.online
 tcp_mux = true
@@ -304,13 +345,15 @@ log_level = info
 log_max_days = 7
 ```
 
-- 🔴 **`dashboard_passwd` is not a valid key for frps 0.17.0 — it only knows
-  `dashboard_pwd`.** The unknown key is silently ignored, so the dashboard is
-  currently running with the **default `admin`/`admin`** credentials while
-  `dashboard_addr = 0.0.0.0` and firewall rule `GPS services TCP 2` expose port
-  7500 to the internet, over plain HTTP. Fixing the key (or closing 7500) is a
-  decision for Максим, not done here. Until then, treat the frps token as
-  readable by anyone who finds the dashboard.
+- **Dashboard is not exposed to the internet.** `dashboard_addr = 127.0.0.1`
+  and there is no firewall rule for port 7500 (see "Firewall" above,
+  `GPS services TCP 2` does not include it) — confirmed by an external TCP
+  connect attempt from the runner (`closed`). `dashboard_pwd` (not the
+  invalid `dashboard_passwd` key from an earlier version of this file) is set
+  to a non-default value. This was fixed under a separate task (IPRSV1-14),
+  not IPRSV1-13 — noted here only because IPRSV1-13's own sweep touched this
+  file and the previous text was flatly wrong (it said the dashboard was open
+  to the internet on default credentials; it is not).
 - `log_file` must use forward slashes — a backslash path breaks the vendor
   logger's config parsing (`\U` in `Users` read as an invalid escape) and frps
   exits immediately without writing a log line.
@@ -324,28 +367,25 @@ log_max_days = 7
 - Config backups: `frps.ini.bak-20260814`, `frps.ini.bak-before-dash`,
   `frps.ini.bak-before-dash0`.
 
-### 🔴 Current state: frps is DOWN (as of 31.08.2026)
+### Current state: frps is running (as of 31.08.2026)
 
-Measured, not guessed:
+🔴 **This was DOWN from 17.08.2026 to some point on/before 31.08.2026 — that
+outage and its fix belong to a separate task (IPRSV1-14), not IPRSV1-13.**
+Documented here only because IPRSV1-13's own sweep re-measured it and the
+previous "frps is DOWN" text in this file was stale/wrong; for the actual
+fix and its rationale, read IPRSV1-14, not this task's spec.
 
-- no `frps.exe` process, and nothing listens on 7000 / 9966 / 9967 / 7500;
-- from outside, `http://scanvision.online:9966/` and
-  `http://<SERVER>:7500/` both time out;
-- the last line in `frps-run.log` is **17.08.2026 20:16:05**;
-- scheduled task `frps` is `Ready`/enabled, `LastRunTime` 14.08.2026 20:52:52,
-  `LastTaskResult` **267014** (`0x41306`, "last run terminated by user").
+Measured 31.08.2026, during IPRSV1-13's own sweep:
 
-So frps ran from 14.08 until 17.08 20:16 and then stopped, and nothing brought
-it back — the task's trigger is "at system startup" and the machine has not
-rebooted since (last boot 04.08.2026). **The cause of the stop is not
-established**: the log ends with ordinary `Accept new mux stream error: broken
-pipe` warnings, no panic and no shutdown line. Do not write down a cause until
-one is actually observed — to catch the next one, add a repeat/restart trigger
-to the task or watch the Windows event log for the process exit.
+- `frps.exe` process running, `StartTime` **31.08.2026 16:46:21**;
+- listening on 7000 (`::`), 9966 (`::`), 9967 (`::`) and 7500
+  (`127.0.0.1` only — see "Dashboard is not exposed" above);
+- log `frps-run.log` has current activity (ordinary `Accept new mux stream
+  error: broken pipe` / vhost warnings, same benign noise as before the
+  outage).
 
-**Consequence while it is down:** no in-vehicle recorder is reachable through
-`<devid>.scanvision.online:9966`, and the CMSV6 desktop client's FRPS features
-cannot work at all.
+No in-vehicle recorder reachability or CMSV6 desktop FRPS testing was done as
+part of IPRSV1-13 — that verification, if needed, is IPRSV1-14's scope.
 
 ### How a recorder is reached
 
