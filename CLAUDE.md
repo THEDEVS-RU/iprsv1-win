@@ -1,12 +1,14 @@
 # IPRSV1-WIN
 
 **This repo now describes TWO servers of the IPRSV1 project.** Everything
-below, up to "Сервер 2 — 200.165.238.242 (без домена)" at the end of this
-file, describes server 1 — `201.34.132.26` (`VDSWIN2K22`, Timeweb VDS) —
-unless a line says otherwise. Server 2, added 03.09.2026 (IPRSV1-18), has its
-own section at the end; the two are separate machines with a shared SSH key
+below, up to "Сервер 2 — 200.165.238.242" at the end of this file, describes
+server 1 — `201.34.132.26` (`VDSWIN2K22`, Timeweb VDS) — unless a line says
+otherwise. Server 2, added 03.09.2026 (IPRSV1-18), has its own section at the
+end; the two are separate machines with a shared SSH key
 (`ai-runner@ai-runners`, same public half on both, by design — see that
-section), separate `frps` tokens and (so far) no other shared configuration.
+section) and, since 04.09.2026 (IPRSV1-18, second spec), a **shared `frps`
+token/dashboard password** — see "Сервер 2" → frps.ini for the price of that
+(paired rotation). No other shared configuration.
 
 Windows Server 2022 host (`VDSWIN2K22`, Timeweb VDS) for the IPRSV1 project.
 Runs the CMSV6 GPS/video platform, an `nginx` TLS front-end and an `frps`
@@ -465,6 +467,18 @@ office VPN, its resolver caches stale answers far longer:
   frps `subdomain` mechanism requires **now exists** (an arbitrary
   third-level name resolves; this file previously said it was missing).
 
+**Zone `scan-vision.ru`** (сервер 2, `200.165.238.242`), NS `reg.ru`. Verified
+via public DoH (`dns.google`) 03.09.2026 — records already existed before
+IPRSV1-18 touched anything, nothing here was created or changed by this
+project:
+
+- `scan-vision.ru` → `200.165.238.242`
+- `www.scan-vision.ru` → `200.165.238.242`
+- `*.scan-vision.ru` → `200.165.238.242` (wildcard, confirmed with an
+  arbitrary third-level probe name) — required by the frps `subdomain`
+  mechanism, same role as the `scanvision.online` wildcard above.
+- TTL 21600.
+
 ## frps
 
 Config `C:\frps\frps.ini`, INI format only (this build does not understand
@@ -888,12 +902,15 @@ Never write actual values of `LOGIN`, `PASSWORD`, `SERVER`, the frps `token`,
 or the dashboard password into this repo, PR descriptions, commit messages, or
 command logs — only their names and how they're used.
 
-## Сервер 2 — 200.165.238.242 (без домена)
+## Сервер 2 — 200.165.238.242
 
 Развёрнут задачей IPRSV1-18 (03.09.2026) как второй, независимый сервер
-проекта — тот же функционал CMSV6+frps, что на сервере 1 выше, но без домена,
-без `nginx`, без TLS и с собственным `frps`-токеном. **Ничего из раздела ниже
-не относится к серверу 1 (`201.34.132.26`) — он не менялся.**
+проекта — тот же функционал CMSV6+frps, что на сервере 1 выше. Задачей
+IPRSV1-18 (вторая спека, 04.09.2026) доведён до состояния, близкого к
+близнецу сервера 1: свой домен `scan-vision.ru`, `nginx` + Let's Encrypt
+(win-acme), общий с сервером 1 `frps`-токен. **Ничего из раздела ниже не
+относится к серверу 1 (`201.34.132.26`) — он не менялся, к нему было только
+чтение (значения frps и версии nginx/win-acme).**
 
 ### Подключение (verified 03.09.2026)
 
@@ -961,26 +978,120 @@ command logs — only their names and how they're used.
   перепроверено после финальной переустановки:
   `IPClient`/`LanIP`/`IPClient2`/`IPDevice2` уже равны `200.165.238.242` —
   мастер установки проставил это сам при установке, правка не потребовалась.
-  У этой версии схемы `server_info` нет колонки `IsHttps` (была в спеке по
-  аналогии с сервером 1 — в этой сборке её просто нет, не путать с
-  отсутствием значения). Значение подтверждено прямым SQL-запросом; проверка
-  через `http://127.0.0.1:6605/3/1?...DevIDNO=...` по спеке — на свежем
-  сервере ещё нет ни одного зарегистрированного устройства, поэтому с
-  произвольным `DevIDNO` эндпоинт отвечает `"device no support"`, а не отдаёт
-  `server.clientIp`/`lanip`; сам факт в БД это не отменяет, довешивание этой
-  проверки — когда появится первый реальный регистратор.
+  **verified 04.09.2026 (IPRSV1-18, вторая спека):** `IPClient`/`LanIP`
+  строки `ID=3` переписаны на `scan-vision.ru` (как на сервере 1 — плеер под
+  HTTPS должен получать доменное имя, покрытое сертификатом, а не голый IP);
+  `IPDevice`/`PortDevice`/`PortClient`/`IPClient2`/`IPDevice2` не менялись.
+  Дамп таблицы перед правкой снят на `C:\Users\Administrator\Desktop\`.
+  `GPSLoginSvr` перезапущен после правки. У этой версии схемы `server_info`
+  нет колонки `IsHttps` (была в спеке по аналогии с сервером 1 — в этой
+  сборке её просто нет, не путать с отсутствием значения). Таблица
+  `jt808_system_params` **есть** (52 строки, verified 04.09.2026), но строки
+  `HttpsMapHttpPort` в ней нет (на сервере 1 это `id=61`) — на этой схеме
+  такого параметра не завели вовсе, а не просто не заполнили. Значение
+  подтверждено прямым SQL-запросом; проверка через
+  `http://127.0.0.1:6605/3/1?...DevIDNO=...` по спеке — на сервере ещё нет ни
+  одного зарегистрированного устройства, поэтому эндпоинт отвечает ошибкой
+  параметров, а не отдаёт `server.clientIp`/`lanip`; сам факт в БД это не
+  отменяет, довешивание этой проверки — когда появится первый реальный
+  регистратор.
 - **frps `0.17.0`** в `C:\frps\frps.ini` (формат INI, `[common]`):
   `bind_port=7000`, `vhost_http_port=9966`, `vhost_https_port=9967`,
-  `subdomain_host=scanvision.online` (задан для будущего домена — DNS на
-  стороне сервера не участвует, ключ нужен, чтобы frps вообще принимал
-  `subdomain`-регистрации), `tcp_mux=true`, `dashboard_addr=127.0.0.1`,
-  `dashboard_port=7500`, `dashboard_user=admin`, `allow_ports=65535`,
-  `max_ports_per_client=1`, `log_file=C:/frps/frps-run.log` (прямые слэши —
-  обратные ломают парсер), `log_way=file`, `log_level=info`,
-  `log_max_days=30`. `token` и `dashboard_pwd` — сгенерированы на сервере
-  случайными (32 и 24 символа), **собственные, не копия токена сервера 1**:
-  общий токен на двух независимых хостах означает, что компрометация одного
-  роняет и другой. Значения — только в `frps.ini` на самой машине.
+  `tcp_mux=true`, `dashboard_addr=127.0.0.1`, `dashboard_port=7500`,
+  `dashboard_user=admin`, `allow_ports=65535`, `max_ports_per_client=1`,
+  `log_file=C:/frps/frps-run.log` (прямые слэши — обратные ломают парсер),
+  `log_way=file`, `log_level=info`, `log_max_days=30`.
+  🔴 **verified 04.09.2026 (IPRSV1-18, вторая спека) — изменение политики
+  против первого прохода:** `subdomain_host` переписан с `scanvision.online`
+  на **`scan-vision.ru`** (у сервера 2 теперь свой домен с рабочей
+  wildcard-записью); `token` и `dashboard_pwd` больше **не собственные** —
+  по прямой просьбе Максима приведены к значениям сервера 1 (прочитаны там
+  по SSH, только чтение, сервер 1 не менялся). Следствие, которое нужно
+  держать в голове: **общий токен на двух хостах означает, что компрометация
+  любой из машин роняет обе, а ротация теперь всегда парная** — меняется на
+  обеих машинах в один заход, иначе часть парка регистраторов отвалится.
+  Значения — только в `frps.ini` на обеих машинах, нигде больше. Бэкап
+  ini-файла до правки: `C:\frps\frps.ini.bak-before-iprsv1-18-parity`.
+  Применено через задачу (`Stop-ScheduledTask`/`Start-ScheduledTask` frps),
+  не запуском `frps.exe` руками.
+
+### nginx (verified 04.09.2026, IPRSV1-18 вторая спека)
+
+`C:\nginx` — nginx `1.30.4` (та же версия, что на сервере 1), скачан и
+распакован заново (не скопирован с сервера 1). Слушает **443, 16604, 16605**
+(порт 80 остаётся у CMSV6 — точку входа на nginx не переносили, это уже
+делали 14.08.2026 и откатили по требованию Максима). `C:\nginx\conf\nginx.conf`
+— копия конфигурации сервера 1 с заменой имён и путей сертификата: один
+443-блок (`server_name scan-vision.ru www.scan-vision.ru`) с полным набором
+websocket-директив IPRSV1-15 в общем `location /` (без них `Upgrade:
+websocket` через 443 отдаёт `404` — подтверждено `101` в проверке ниже) и
+два медиа-блока IPRSV1-17 (`16605 → 127.0.0.1:6605` `GPSLoginSvr`,
+`16604 → 127.0.0.1:6604` `GPSMediaSvr`), без `ssl_stapling` (только для
+сертификата GlobalSign сервера 1). На уровне `http {}` —
+`client_max_body_size 512m;` и `map $http_upgrade $connection_upgrade`. Нет
+`listen 80`, нет `location /.well-known/acme-challenge/` (challenge отдаёт
+tomcat, см. win-acme ниже), нет HSTS, нет редиректа 80→443.
+
+- `C:\nginx\run_nginx.bat` — идемпотентный (`tasklist` на живой `nginx.exe`,
+  запускает только при отсутствии); задача планировщика `nginx_run`, триггер
+  «при старте системы», от `SYSTEM`, `RunLevel Highest`, рабочая папка
+  `C:\nginx`, перезапуск при сбое 1 минута × 3. Второй задачи под nginx нет.
+- `C:\nginx\reload-nginx.bat` — две строки (`cd /d C:\nginx` +
+  `nginx.exe -s reload`), вызывается win-acme после продления.
+- Три ловушки сервера 1 воспроизведены один в один и подтверждены здесь:
+  `nginx.exe -t` из SSH-сессии падает на относительных путях — запускать
+  `nginx.exe -p C:\nginx -c conf\nginx.conf -t`; `nginx.exe -s reload` из
+  интерактивной SSH-сессии (`Administrator`) не работает
+  (`OpenEvent ... 5: Access is denied`), т.к. мастер запущен задачей от
+  `SYSTEM` — применять через `taskkill /F /IM nginx.exe` +
+  `schtasks /run /tn nginx_run`; после каждого перезапуска проверять
+  `Get-Process nginx` (`StartTime`) и что на 443/16604/16605 слушают только
+  свежие PID.
+
+### win-acme и сертификат (verified 04.09.2026, IPRSV1-18 вторая спека)
+
+`C:\wacs` — win-acme `2.2.9.1701` (pluggable, та же версия, что на сервере
+1), скачан заново из официального релиза, не скопирован. Валидация —
+`http-01` через файловую систему, webroot — корень веб-приложения tomcat
+`C:\Program Files\CMSServerV6\tomcat\webapps\gpsweb` (найден через `Context
+docBase="../webapps/gpsweb" path=""` в `server.xml`; `appBase="ttxapps"` из
+`<Host>` пустой и не используется — не путать одно с другим при следующей
+переустановке). Порт 80 у CMSV6 не отбирался, в `nginx.conf` ACME-location
+не заводили.
+
+- Сертификат выпущен на `scan-vision.ru` + `www.scan-vision.ru`, хранилище
+  pemfiles в `C:\nginx\conf\le` — фактические имена файлов:
+  `scan-vision.ru-chain.pem` / `scan-vision.ru-key.pem` (используются в
+  `nginx.conf`), плюс `scan-vision.ru-crt.pem` и
+  `scan-vision.ru-chain-only.pem`. Действителен `03.09.2026 → 02.12.2026`.
+  Не wildcard: устройства-субдомены (`<devid>.scan-vision.ru`) сертификатом
+  не покрыты, штатный путь к ним — обычный HTTP на `:9966` (как на
+  сервере 1).
+- Задача планировщика `win-acme renew (acme-v02.api.letsencrypt.org)`
+  создана автоматически, включена, идёт от `SYSTEM`, старт `09:00` + случайная
+  задержка до 4 часов. Следующее продление после **28.10.2026**.
+- Принудительное продление (`wacs.exe --renew --force`) прогнано **один раз**
+  04.09.2026 (недельный лимит Let's Encrypt на этом наборе имён — второй раз
+  не гонять без крайней необходимости): использовало кеш заказа (в пределах
+  1 суток после выпуска не расходует лимит повторно), экспортировало
+  `.pem`-файлы заново. Попытка reload из самого win-acme (запущенного
+  интерактивно по SSH от `Administrator`) закономерно упала с той же
+  `OpenEvent ... Access is denied`, что и у сервера 1 — это ожидаемо и не
+  баг: настоящее плановое продление идёт от задачи `win-acme renew (...)`,
+  которая, как и `nginx_run`, работает от `SYSTEM` и поэтому применяет
+  `reload-nginx.bat` без этой проблемы. После этого nginx перезапущен штатным
+  способом (`taskkill` + `schtasks /run /tn nginx_run`), новые PID слушают
+  443/16604/16605, `https://scan-vision.ru/` и `https://www.scan-vision.ru/`
+  отдают `200` снаружи без `-k`.
+- ⚠️ **Живое видео под HTTPS, вероятно, не работает** — как на сервере 1
+  (флаг `IsHttps` там не решён, вопрос к вендору), а в схеме сервера 2
+  колонки `IsHttps` нет вовсе (см. MySQL выше) и строки `HttpsMapHttpPort` в
+  `jt808_system_params` тоже нет. Полный end-to-end путь плеера не проверен
+  — на сервере ещё нет зарегистрированных устройств, чтобы дойти до реального
+  video/archive запроса. Ожидаемое поведение: страница и интерфейс по HTTPS
+  работают, видео под `https:` заблокируется как смешанное содержимое,
+  рабочий путь для видео — `http://scan-vision.ru`. Известное ограничение,
+  не повод откатывать задачу.
 
 ### Автозапуск (verified 03.09.2026)
 
@@ -1000,47 +1111,60 @@ command logs — only their names and how they're used.
   через ~1 минуту (15:22:54 → 15:24:03 в тесте 03.09.2026), ровно один
   экземпляр, все порты снова слушаются.
 
-### Firewall (verified 03.09.2026)
+### Firewall (verified 04.09.2026, IPRSV1-18 вторая спека)
 
-72 → 73 включённых входящих allow-правил после последнего добавления (69 → 72
-после первого набора из трёх правил, ещё +1 за 443). Правила:
+97 → 99 включённых входящих allow-правил после добавления пары
+`iprsv1-18-parity-*` (было 72 → 73 после первого прохода 03.09.2026 — число
+включённых правил считалось иначе/на другую дату, актуальное измерение
+04.09.2026 даёт 97 до и 99 после; расхождение с ранее записанным «73» не
+пересчитывалось назад, оно фиксирует именно текущий замер). Правила:
 
 - `iprsv1-18-cmsv6-tcp` — TCP **80, 2121-2162, 6601-6612, 6617, 6630-6635**
 - `iprsv1-18-cmsv6-udp` — UDP **6601-6612**
 - `iprsv1-18-frps-tcp` — TCP **7000, 9966, 9967, 20021**
 - `iprsv1-18-443-tcp` — TCP **443**
+- `iprsv1-18-parity-tcp` (новое, 04.09.2026) — TCP **88, 8080, 8088, 16601,
+  16603-16605, 16607-16609, 16611, 20000-21000, 30000-31000**
+- `iprsv1-18-parity-udp` (новое, 04.09.2026) — UDP **20000-21000,
+  30000-31000**
 - `OpenSSH Server (sshd)` — TCP 22 (создано человеком в рамках шага 0)
 
 Все — `-Profile Any -RemoteAddress Any -Program Any -Action Allow`. Порт 7500
-(дашборд frps) не открыт и не должен быть.
+(дашборд frps) не открыт и не должен быть — подтверждено снаружи (таймаут).
+Динамический диапазон портов сервера 2 (`netsh int ipv4 show dynamicport`,
+verified 04.09.2026): TCP и UDP **9000-64999** — совпадает с сервером 1, и
+часть открытых здесь диапазонов (20000-21000, 30000-31000) попадает внутрь
+него. Риск известный и на сервере 1 принят Максимом сознательно, замер
+зафиксирован, а не предположен.
 
-🔴 **Отклонение от спеки, согласованное с Максимом в чате задачи 03.09.2026:**
-спека прямо запрещала открывать 443 («домен, nginx, TLS — вне задачи»); порт
-20021 в спеке тоже не упоминался. Максим явно попросил открыть оба порта для
-паритета с сервером 1 (там они часть правила `GPS services TCP 2` /
-`GPS services TCP`) — сделано по его прямому запросу в чате, а не по своей
-инициативе. **На 03.09.2026 за 443 ничего не слушает** — `nginx` на этом
-сервере не установлен, TLS не настроен; порт открыт заранее, функционально
-пока не используется.
+История: `iprsv1-18-443-tcp` и порт `20021` в правиле `iprsv1-18-frps-tcp`
+были открыты ещё 03.09.2026, до этой задачи и до того, как за 443 появился
+слушатель — по прямому запросу Максима в чате, вопреки первой спеке, которая
+443 прямо запрещала (nginx/TLS были тогда вне задачи). Это отклонение с тех
+пор реализовано: 443 теперь занят nginx.
 
 ### Отличия от сервера 1
 
-- Нет домена, нет `nginx`, нет TLS, нет `win-acme`/сертификатов — сознательно
-  вне этой задачи (см. 🔴 выше — 443 открыт заранее, но не занят).
-- Собственный, отдельный `token` frps (не боевой).
+- **Версия и раскладка CMSV6.** `7.36.1_20251023` против текущей версии
+  сервера 1, плоская раскладка каталогов (`C:\Program Files\CMSServerV6\`
+  без версионной подпапки) против вложенной на сервере 1.
 - Служба `gpstomcat6` в этой сборке `Manual`, а не `Automatic` (не менялось
   специально, так поставил мастер).
-- **Домен/nginx/TLS не заспланированы.** 03.09.2026 Максим в чате задачи
-  IPRSV1-18 упомянул домен `scan-vision.ru` и `certbot`/Let's Encrypt «по
-  аналогии с сервером 1» — но сервер 1 фактически использует `win-acme` +
-  сертификат GlobalSign, не `certbot`, так что «по аналогии» здесь потребует
-  отдельного решения, а не копирования. На 03.09.2026 под это нет ни спеки,
-  ни заведённой задачи — это только упоминание в чате, не план.
+- **Схема БД `1010GPS` отличается от сервера 1:** нет колонки `IsHttps` в
+  `server_info`, нет строки `HttpsMapHttpPort` в `jt808_system_params` (сама
+  таблица есть, строки нет). Из-за этого статус видео под HTTPS здесь нельзя
+  привести к состоянию сервера 1 копированием — там тоже не работает
+  (флаг `IsHttps` не решён), но по другой причине.
+- **Сертификат.** Let's Encrypt (win-acme, автопродление) против купленного
+  GlobalSign без автопродления на сервере 1 — сознательное решение этой
+  задачи, а не временное состояние: у сервера 2 нет купленного сертификата,
+  и заводить его не просили.
 
 ### Как перевести регистратор на этот сервер
 
-В `frpc.ini`/`frpcSet.xml` на самом регистраторе поменять **оба** значения —
-`<ServerIp>` на `200.165.238.242` и `<TokenForCon>` на новый токен этого
-сервера (взять с самой машины, `C:\frps\frps.ini`, не отсюда — здесь его нет
-и не будет). Один `<ServerIp>` без токена не подключится: у серверов разные
-токены.
+В `frpc.ini`/`frpcSet.xml` на самом регистраторе поменять **только**
+`<ServerIp>` на `200.165.238.242` — `<TokenForCon>` менять не нужно: с
+04.09.2026 `token` frps общий для обоих серверов (см. frps.ini выше).
+Один `<ServerIp>` без смены токена теперь подключится сам. Это и есть цена
+общего токена: удобство переключения регистратора в обмен на парную
+ротацию при компрометации любой из машин.
