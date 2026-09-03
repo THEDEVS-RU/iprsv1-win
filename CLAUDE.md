@@ -4,8 +4,9 @@
 below, up to "Сервер 2 — 200.165.238.242 (без домена)" at the end of this
 file, describes server 1 — `201.34.132.26` (`VDSWIN2K22`, Timeweb VDS) —
 unless a line says otherwise. Server 2, added 03.09.2026 (IPRSV1-18), has its
-own section at the end; the two are separate machines with separate SSH keys
-usage, separate `frps` tokens and (so far) no shared configuration.
+own section at the end; the two are separate machines with a shared SSH key
+(`ai-runner@ai-runners`, same public half on both, by design — see that
+section), separate `frps` tokens and (so far) no other shared configuration.
 
 Windows Server 2022 host (`VDSWIN2K22`, Timeweb VDS) for the IPRSV1 project.
 Runs the CMSV6 GPS/video platform, an `nginx` TLS front-end and an `frps`
@@ -913,30 +914,51 @@ command logs — only their names and how they're used.
 ### Что установлено (verified 03.09.2026)
 
 - **CMSV6 `7.36.1_20251023`** (не та версия, что на сервере 1 — задача
-  требовала именно эту сборку с Яндекс.Диска; sha256 сверен перед установкой).
-  Путь установки — `C:\Program Files\CMSServerV6\` (в этой сборке файлы лежат
-  плоско, без версионной подпапки вида `\7.36.1_20251023\`, в отличие от
-  текущей раскладки сервера 1 — см. предупреждение о переустановках выше).
-  Тихий инсталлятор (`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-`)
-  копирует только файлы — регистрацию Windows-служб и настройку MySQL он не
-  делает; это отдельный шаг GUI-мастера (`gpssvrwizard.exe`/`gpssvrctrl.exe`
-  из `CMSServerV6\bin`), пройденный человеком интерактивно через RDP.
-- Службы (все, кроме `GPSDaemon`, — `Manual`, подняты вручную мастером):
-  `GPSDaemon` (Automatic), `GPSDataProcSvr`, `GPSDownSvr`, `GPSFtpd`,
-  `GPSGatewaySvr`, `GPSGeocodeSvr`, `GPSLoginSvr`, `GPSMediaSvr`,
-  `GPSMysqld`, `GPSStorageSvr`, `GPSUserSvr`, `gpstomcat6` — все `Running`.
+  требовала именно эту сборку с Яндекс.Диска). Путь установки —
+  `C:\Program Files\CMSServerV6\` (в этой сборке файлы лежат плоско, без
+  версионной подпапки вида `\7.36.1_20251023\`, в отличие от текущей
+  раскладки сервера 1 — см. предупреждение о переустановках выше).
+- 🔴 **Как реально получилось рабочее состояние — не повторяй частичный
+  путь.** Тихий инсталлятор (`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-`)
+  копирует только файлы, sha256/размер которых сверены на СКАЧАННОМ файле —
+  Windows-службы и MySQL он не создаёт вообще. Первый проход GUI-мастера
+  (`gpssvrwizard.exe`/`gpssvrctrl.exe` из `CMSServerV6\bin`), пройденный
+  человеком через RDP, зарегистрировал большинство `GPS*`-служб, но НЕ
+  `GPSMysqld` и не создал схему `1010GPS` — `tomcat` при этом не мог
+  стартовать вообще, потому что `tomcat\conf\server.xml` в поставке
+  отсутствует (см. ниже), а без БД веб-платформа зависала на инициализации
+  (`TldScanner` в `catalina.log`, без прогресса). **Этот частичный путь
+  рабочего сервера не даёт** — для сервера 3 его не воспроизводить. Рабочее
+  состояние получилось только после того, как Максим **полностью
+  переустановил CMSV6 вручную через RDP тем же инсталлятором** («я сам
+  переустановил cmsv6 нужный и запустил он работает», 03.09.2026) — после
+  этого появилась служба `GPSMysqld`, инициализировалась схема `1010GPS`, все
+  службы вышли в `Running`. Версия и раскладка ПОСЛЕ этой переустановки
+  подтверждены заново, а не только sha256 файла до неё:
+  `C:\Program Files\CMSServerV6\bin\version.ini` → `version=7.36.1_20251023`;
+  путь по-прежнему плоский, без версионной подпапки.
+- Службы (все, кроме `GPSDaemon`, — `Manual`): `GPSDaemon` (Automatic),
+  `GPSDataProcSvr`, `GPSDownSvr`, `GPSFtpd`, `GPSGatewaySvr`, `GPSGeocodeSvr`,
+  `GPSLoginSvr`, `GPSMediaSvr`, `GPSMysqld`, `GPSStorageSvr`, `GPSUserSvr`,
+  `gpstomcat6` — все `Running`.
 - **Tomcat на порту 80.** Особенность этой сборки: `tomcat\conf\server.xml`
   в базовой поставке отсутствует вовсе — вместо него лежит набор именованных
   шаблонов (`server - 80.xml`, `server - 8080.xml`, `server - 443-https.xml`
   и другие), и активный `server.xml` нужно выбрать копированием одного из них
-  — сам инсталлятор этого не делает, поэтому `gpstomcat6` не мог стартовать,
-  пока это не было сделано. Использован готовый `server - 80.xml`
-  (коннектор `Http11Nio2Protocol` на `port="80"`, без `address=127.0.0.1` —
-  то, что и требовалось), скопирован поверх `server.xml`. Локально и снаружи
-  `http://200.165.238.242/` отдаёт `200`.
-- **MySQL** — `GPSMysqld`, сборка `mysql\5.5_x64` (в поставке рядом лежит
-  неиспользуемая `5.7_x64`), слушает `127.0.0.1:3311`. Схема `1010GPS`,
-  `server_info` → `ID=3` (`IDNO='M1'`, `Name='Media Server'`):
+  — сам инсталлятор этого не делает. Скопирован `server - 80.xml` поверх
+  `server.xml` (коннектор `Http11Nio2Protocol` на `port="80"`, без
+  `address=127.0.0.1`); текущий `server.xml` на машине по-прежнему содержит
+  этот коннектор (проверено заново после финальной переустановки). Локально и
+  снаружи `http://200.165.238.242/` отдаёт `200`.
+- **MySQL** — служба `GPSMysqld`, бинарь плоско в `mysql\bin\gpsmysqld`
+  (подпапки `mysql\5.5_x64\`/`mysql\5.7_x64\`, оставшиеся от первого,
+  незавершённого прохода мастера, не используются — актуальный `my.ini`
+  находится в `mysql\my.ini`), слушает `127.0.0.1:3311`. `my.ini`:
+  `basedir="C:/Program Files/CMSServerV6/mysql/"`,
+  `datadir="C:/Program Files/CMSServerV6/mysql/gserver_dbdata/"`, `port=3311`,
+  `bind-address=127.0.0.1` — та же раскладка, что на сервере 1. Схема
+  `1010GPS`, `server_info` → `ID=3` (`IDNO='M1'`, `Name='Media Server'`),
+  перепроверено после финальной переустановки:
   `IPClient`/`LanIP`/`IPClient2`/`IPDevice2` уже равны `200.165.238.242` —
   мастер установки проставил это сам при установке, правка не потребовалась.
   У этой версии схемы `server_info` нет колонки `IsHttps` (была в спеке по
@@ -1008,13 +1030,12 @@ command logs — only their names and how they're used.
 - Собственный, отдельный `token` frps (не боевой).
 - Служба `gpstomcat6` в этой сборке `Manual`, а не `Automatic` (не менялось
   специально, так поставил мастер).
-- **В процессе (03.09.2026, тем же вечером):** Максим попросил добавить
-  домен `scan-vision.ru`, `nginx` и TLS через `certbot`/Let's Encrypt «по
+- **Домен/nginx/TLS не заспланированы.** 03.09.2026 Максим в чате задачи
+  IPRSV1-18 упомянул домен `scan-vision.ru` и `certbot`/Let's Encrypt «по
   аналогии с сервером 1» — но сервер 1 фактически использует `win-acme` +
-  сертификат GlobalSign, не `certbot`/Let's Encrypt, так что «по аналогии»
-  здесь требует отдельного решения, а не копирования. Отправлено на
-  доработку спеки (`/arch`) отдельной задачей — сюда, в раздел про сервер 2,
-  допишется after того, как будет сделано.
+  сертификат GlobalSign, не `certbot`, так что «по аналогии» здесь потребует
+  отдельного решения, а не копирования. На 03.09.2026 под это нет ни спеки,
+  ни заведённой задачи — это только упоминание в чате, не план.
 
 ### Как перевести регистратор на этот сервер
 
