@@ -168,6 +168,11 @@ reinstalled since, and the vendor now ships the same coverage under new names:
   from outside before this rule existed), so this rule is a deliberate
   task-scoped duplicate for documentation clarity, same pattern as the
   existing named rules, not a functional gap-fill.
+- `iprsv1-18-open-all` (IPRSV1-18, created 03.09.2026) — `Protocol Any`,
+  `LocalPort Any`, `-Profile Any -RemoteAddress Any -Program Any`; supersedes
+  every rule above for actual reachability (any port an Allow rule doesn't
+  already cover is now open too). See the dedicated paragraph below for the
+  full before/after measurement and the accepted risk.
 
 **IPRSV1-13 (31.08.2026): decision by Максим — open the full requested list,
 overlap with the dynamic port range accepted.** He was shown the risk first
@@ -207,7 +212,7 @@ to tell "open" from "closed" that way.
 Any -RemoteAddress Any -Program Any` (no `-Protocol`/`-LocalPort` — the
 `New-NetFirewallRule` default is already any/any), applied on both server 1
 and server 2 (see `### Firewall` under "Сервер 2" below); existing rules were
-not touched or removed. Firewall itself stays enabled on both profiles
+not touched or removed. Firewall itself stays enabled on all three profiles
 (`Domain`/`Private`/`Public` — `Set-NetFirewallProfile -Enabled False` was
 considered and rejected, see the spec). Measured before/after (enabled
 inbound `Allow` rules): **103 → 104** on this server. External checks from
@@ -536,11 +541,16 @@ log_max_days = 30
   wrong key ever comes back (a future rewrite, a copy from a vendor example),
   the dashboard reverts to `admin`/`admin` with no error at all. Always check
   the key actually present is `dashboard_pwd`.
-- **Closed since 31.08.2026 (IPRSV1-16):** `dashboard_addr = 127.0.0.1` and
-  firewall rule `GPS services TCP 2` no longer includes 7500 — the dashboard
-  is unreachable from the internet. Reach it only from the machine itself or
-  through an SSH tunnel: `ssh -i ~/.ssh/id_ed25519 -N -L 7500:127.0.0.1:7500
-  Administrator@$SERVER`. `admin`/`admin` now gets `401`.
+- **Closed since 31.08.2026 (IPRSV1-16), now by `dashboard_addr` alone:**
+  `dashboard_addr = 127.0.0.1` means frps never listens on anything but
+  loopback, so the dashboard is unreachable from the internet regardless of
+  firewall state. The firewall rule `GPS services TCP 2` dropping 7500 was
+  the reason until 03.09.2026; since `iprsv1-18-open-all` (`Protocol Any`,
+  `LocalPort Any`) that rule no longer matters — the firewall does not close
+  7500 anymore, only the loopback bind does. Reach the dashboard only from
+  the machine itself or through an SSH tunnel: `ssh -i ~/.ssh/id_ed25519 -N
+  -L 7500:127.0.0.1:7500 Administrator@$SERVER`. `admin`/`admin` now gets
+  `401`.
 - **What this build's dashboard actually exposes** — checked against upstream
   `v0.17.0` source, not assumed: read-only routes only (`/api/serverinfo`,
   per-protocol proxy lists, `/api/proxy/traffic/:name`, static UI), no route
@@ -691,12 +701,14 @@ for how it really behaves.
   listen on 0.0.0.0:9966`, `https service listen on 0.0.0.0:9967`,
   **`Dashboard listen on 127.0.0.1:7500`**, `Start frps success`;
 - externally: 7000/9966/9967 accept connections; `:7500` times out — closed on
-  purpose (IPRSV1-16's firewall-rule and `dashboard_addr` change above), not a
-  regression from IPRSV1-14, which never touches `frps.ini` or firewall rules.
-  A made-up subdomain on `:9966` still returns **404 from frps** — vhost
-  routing works end to end and does not depend on the dashboard, which is
-  what actually satisfies IPRSV1-14's own external-reachability criterion now
-  that `:7500` is intentionally closed;
+  purpose, by `dashboard_addr = 127.0.0.1` alone since `iprsv1-18-open-all`
+  (03.09.2026) stopped the firewall from being the reason (IPRSV1-16's
+  original firewall-rule exclusion no longer matters, see "Firewall" above);
+  not a regression from IPRSV1-14, which never touches `frps.ini` or firewall
+  rules. A made-up subdomain on `:9966` still returns **404 from frps** —
+  vhost routing works end to end and does not depend on the dashboard, which
+  is what actually satisfies IPRSV1-14's own external-reachability criterion
+  now that `:7500` is intentionally closed (via loopback bind, not firewall);
 - `http://scanvision.online/` and `https://scanvision.online/` both `200`;
 - `Get-NetTCPConnection -State Listen -LocalPort 7500` shows only
   `127.0.0.1`;
@@ -1153,9 +1165,17 @@ docBase="../webapps/gpsweb" path=""` в `server.xml`; `appBase="ttxapps"` из
 - `iprsv1-18-parity-udp` (новое, 03.09.2026) — UDP **20000-21000,
   30000-31000**
 - `OpenSSH Server (sshd)` — TCP 22 (создано человеком в рамках шага 0)
+- `iprsv1-18-open-all` (IPRSV1-18, создано 03.09.2026) — `Protocol Any`,
+  `LocalPort Any`, `-Profile Any -RemoteAddress Any -Program Any`; перекрывает
+  по факту доступности все правила выше (любой порт, не покрытый Allow-
+  правилом раньше, теперь тоже открыт). Полный замер до/после и принятый
+  риск — в отдельном абзаце ниже.
 
 Все — `-Profile Any -RemoteAddress Any -Program Any -Action Allow`. Порт 7500
-(дашборд frps) не открыт и не должен быть — подтверждено снаружи (таймаут).
+(дашборд frps) снаружи недоступен — подтверждено таймаутом, но с 03.09.2026
+(`iprsv1-18-open-all`) это уже не заслуга правил файрвола: они порт не
+закрывают (`Protocol Any`/`LocalPort Any` перекрывает всё), недоступность
+целиком держится на `dashboard_addr = 127.0.0.1` (см. `## frps` выше).
 Динамический диапазон портов сервера 2 (`netsh int ipv4 show dynamicport`,
 verified 03.09.2026): TCP и UDP **9000-64999** — совпадает с сервером 1, и
 часть открытых здесь диапазонов (20000-21000, 30000-31000) попадает внутрь
