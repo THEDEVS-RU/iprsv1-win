@@ -201,6 +201,30 @@ not a failure; for those the rule's existence is the only evidence. UDP is
 not checked externally at all — no responder on the other end means no way
 to tell "open" from "closed" that way.
 
+**`iprsv1-18-open-all` (03.09.2026, IPRSV1-18): all inbound ports opened, by
+Максим's direct request.** Verbatim in the task chat: «нужно открыть все
+порты у обоих машин». One rule, `-Direction Inbound -Action Allow -Profile
+Any -RemoteAddress Any -Program Any` (no `-Protocol`/`-LocalPort` — the
+`New-NetFirewallRule` default is already any/any), applied on both server 1
+and server 2 (see `### Firewall` under "Сервер 2" below); existing rules were
+not touched or removed. Firewall itself stays enabled on both profiles
+(`Domain`/`Private`/`Public` — `Set-NetFirewallProfile -Enabled False` was
+considered and rejected, see the spec). Measured before/after (enabled
+inbound `Allow` rules): **103 → 104** on this server. External checks from
+the runner: before, TCP `135`/`139`/`445`/`49664` timed out (listeners exist:
+RPC `svchost`, SMB `LanmanServer` Running, dynamic-range RPC) while `5357`
+and `10050` already answered; after, `135`/`139`/`445`/`49664` all answer too,
+`5357`/`10050` unchanged. **Consequence accepted deliberately, not a side
+effect:** SMB (`139`/`445`) and RPC (`135`, plus the `49664`+ dynamic range)
+are now reachable from the internet on a Windows box with password admin
+auth — a standard ransomware entry vector — and both servers share one frps
+`token` since 03.09.2026, so a compromise of either machine exposes both.
+Rollback is deleting the one rule per machine. `7500` (frps dashboard,
+`dashboard_addr 127.0.0.1`) and `3311` (MySQL, `bind-address=127.0.0.1`)
+stayed unreachable from outside after this change too — they only listen on
+loopback, so no inbound rule opens them; IPRSV1-16's closed-dashboard
+decision is unaffected.
+
 ### Dynamic port range
 
 Verified 31.08.2026 (IPRSV1-13): `netsh int ipv4 show dynamicport tcp` and
@@ -1143,6 +1167,31 @@ verified 03.09.2026): TCP и UDP **9000-64999** — совпадает с сер
 слушатель — по прямому запросу Максима в чате, вопреки первой спеке, которая
 443 прямо запрещала (nginx/TLS были тогда вне задачи). Это отклонение с тех
 пор реализовано: 443 теперь занят nginx.
+
+**`iprsv1-18-open-all` (03.09.2026, IPRSV1-18, третья спека): открыты все
+порты, по прямой просьбе Максима.** Дословно в чате задачи: «нужно открыть
+все порты у обоих машин». Одно правило,
+`-Direction Inbound -Action Allow -Profile Any -RemoteAddress Any -Program
+Any` (без `-Protocol`/`-LocalPort` — по умолчанию у `New-NetFirewallRule`
+и так любой/любой), применено на обеих машинах (см. `### Firewall` сервера 1
+выше); существующие правила не тронуты и не удалены. Файрвол остался
+включён на всех профилях (`Domain`/`Private`/`Public`) —
+`Set-NetFirewallProfile -Enabled False` рассматривался и был отклонён, см.
+спеку. Замер до/после (включённых входящих `Allow`-правил): **99 → 100** на
+этой машине. Внешние проверки с раннера: до — TCP `135`/`139`/`445`/`49664`
+не отвечали (слушатели есть: RPC `svchost`, SMB `LanmanServer` Running,
+динамический диапазон RPC), `5357`/`10050` уже отвечали; после —
+`135`/`139`/`445`/`49664` тоже отвечают, `5357`/`10050` без изменений.
+**Последствие принято сознательно, а не побочный эффект:** SMB
+(`139`/`445`) и RPC (`135`, плюс диапазон `49664`+) теперь доступны из
+интернета на Windows-машине с парольной аутентификацией администратора —
+типовой вектор для шифровальщиков, а поскольку с 03.09.2026 у обеих машин
+общий `token` frps, компрометация любой из них затрагивает обе. Откат —
+удаление одного правила на каждой машине. `7500` (дашборд frps,
+`dashboard_addr 127.0.0.1`) и `3311` (MySQL, `bind-address=127.0.0.1`)
+остались недоступны снаружи и после этой правки — они слушают только
+loopback, ни одно входящее правило их не открывает; решение IPRSV1-16 о
+закрытом дашборде не отменено.
 
 ### Отличия от сервера 1
 
