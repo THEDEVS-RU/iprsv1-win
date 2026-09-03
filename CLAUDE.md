@@ -1,5 +1,12 @@
 # IPRSV1-WIN
 
+**This repo now describes TWO servers of the IPRSV1 project.** Everything
+below, up to "Сервер 2 — 200.165.238.242 (без домена)" at the end of this
+file, describes server 1 — `201.34.132.26` (`VDSWIN2K22`, Timeweb VDS) —
+unless a line says otherwise. Server 2, added 03.09.2026 (IPRSV1-18), has its
+own section at the end; the two are separate machines with separate SSH keys
+usage, separate `frps` tokens and (so far) no shared configuration.
+
 Windows Server 2022 host (`VDSWIN2K22`, Timeweb VDS) for the IPRSV1 project.
 Runs the CMSV6 GPS/video platform, an `nginx` TLS front-end and an `frps`
 (fatedier/frp) reverse-proxy server used to reach in-vehicle recorders.
@@ -879,3 +886,140 @@ Done and reverted on the same day, kept here so the backup files make sense:
 Never write actual values of `LOGIN`, `PASSWORD`, `SERVER`, the frps `token`,
 or the dashboard password into this repo, PR descriptions, commit messages, or
 command logs — only their names and how they're used.
+
+## Сервер 2 — 200.165.238.242 (без домена)
+
+Развёрнут задачей IPRSV1-18 (03.09.2026) как второй, независимый сервер
+проекта — тот же функционал CMSV6+frps, что на сервере 1 выше, но без домена,
+без `nginx`, без TLS и с собственным `frps`-токеном. **Ничего из раздела ниже
+не относится к серверу 1 (`201.34.132.26`) — он не менялся.**
+
+### Подключение (verified 03.09.2026)
+
+- SSH, порт 22 (включён вручную человеком через RDP — снаружи у машины
+  изначально был открыт только 3389, автоматически включить SSH из пода было
+  нечем: `xfreerdp`/`nmap`/`sudo`/`apt` в поде отсутствуют).
+- Вход ключом `ai-runner@ai-runners` (та же публичная половина, что на
+  сервере 1, из secret `iprsv1-win-ssh`, namespace `ai-runners`) — установлен
+  в `C:\ProgramData\ssh\administrators_authorized_keys`, наследование прав
+  снято, оставлены `Administrators`+`SYSTEM`. Пароль `Administrator` (в
+  описании задачи IPRSV1-18 на доске) после установки ключа для работы не
+  нужен.
+- Многострочный PowerShell — только через `-EncodedCommand`, как на сервере
+  1; первой строкой скриптов, читающих `Get-NetFirewallRule`/
+  `Get-ScheduledTask`/`Get-NetTCPConnection`, ставить
+  `$ProgressPreference = 'SilentlyContinue'`.
+
+### Что установлено (verified 03.09.2026)
+
+- **CMSV6 `7.36.1_20251023`** (не та версия, что на сервере 1 — задача
+  требовала именно эту сборку с Яндекс.Диска; sha256 сверен перед установкой).
+  Путь установки — `C:\Program Files\CMSServerV6\` (в этой сборке файлы лежат
+  плоско, без версионной подпапки вида `\7.36.1_20251023\`, в отличие от
+  текущей раскладки сервера 1 — см. предупреждение о переустановках выше).
+  Тихий инсталлятор (`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-`)
+  копирует только файлы — регистрацию Windows-служб и настройку MySQL он не
+  делает; это отдельный шаг GUI-мастера (`gpssvrwizard.exe`/`gpssvrctrl.exe`
+  из `CMSServerV6\bin`), пройденный человеком интерактивно через RDP.
+- Службы (все, кроме `GPSDaemon`, — `Manual`, подняты вручную мастером):
+  `GPSDaemon` (Automatic), `GPSDataProcSvr`, `GPSDownSvr`, `GPSFtpd`,
+  `GPSGatewaySvr`, `GPSGeocodeSvr`, `GPSLoginSvr`, `GPSMediaSvr`,
+  `GPSMysqld`, `GPSStorageSvr`, `GPSUserSvr`, `gpstomcat6` — все `Running`.
+- **Tomcat на порту 80.** Особенность этой сборки: `tomcat\conf\server.xml`
+  в базовой поставке отсутствует вовсе — вместо него лежит набор именованных
+  шаблонов (`server - 80.xml`, `server - 8080.xml`, `server - 443-https.xml`
+  и другие), и активный `server.xml` нужно выбрать копированием одного из них
+  — сам инсталлятор этого не делает, поэтому `gpstomcat6` не мог стартовать,
+  пока это не было сделано. Использован готовый `server - 80.xml`
+  (коннектор `Http11Nio2Protocol` на `port="80"`, без `address=127.0.0.1` —
+  то, что и требовалось), скопирован поверх `server.xml`. Локально и снаружи
+  `http://200.165.238.242/` отдаёт `200`.
+- **MySQL** — `GPSMysqld`, сборка `mysql\5.5_x64` (в поставке рядом лежит
+  неиспользуемая `5.7_x64`), слушает `127.0.0.1:3311`. Схема `1010GPS`,
+  `server_info` → `ID=3` (`IDNO='M1'`, `Name='Media Server'`):
+  `IPClient`/`LanIP`/`IPClient2`/`IPDevice2` уже равны `200.165.238.242` —
+  мастер установки проставил это сам при установке, правка не потребовалась.
+  У этой версии схемы `server_info` нет колонки `IsHttps` (была в спеке по
+  аналогии с сервером 1 — в этой сборке её просто нет, не путать с
+  отсутствием значения). Значение подтверждено прямым SQL-запросом; проверка
+  через `http://127.0.0.1:6605/3/1?...DevIDNO=...` по спеке — на свежем
+  сервере ещё нет ни одного зарегистрированного устройства, поэтому с
+  произвольным `DevIDNO` эндпоинт отвечает `"device no support"`, а не отдаёт
+  `server.clientIp`/`lanip`; сам факт в БД это не отменяет, довешивание этой
+  проверки — когда появится первый реальный регистратор.
+- **frps `0.17.0`** в `C:\frps\frps.ini` (формат INI, `[common]`):
+  `bind_port=7000`, `vhost_http_port=9966`, `vhost_https_port=9967`,
+  `subdomain_host=scanvision.online` (задан для будущего домена — DNS на
+  стороне сервера не участвует, ключ нужен, чтобы frps вообще принимал
+  `subdomain`-регистрации), `tcp_mux=true`, `dashboard_addr=127.0.0.1`,
+  `dashboard_port=7500`, `dashboard_user=admin`, `allow_ports=65535`,
+  `max_ports_per_client=1`, `log_file=C:/frps/frps-run.log` (прямые слэши —
+  обратные ломают парсер), `log_way=file`, `log_level=info`,
+  `log_max_days=30`. `token` и `dashboard_pwd` — сгенерированы на сервере
+  случайными (32 и 24 символа), **собственные, не копия токена сервера 1**:
+  общий токен на двух независимых хостах означает, что компрометация одного
+  роняет и другой. Значения — только в `frps.ini` на самой машине.
+
+### Автозапуск (verified 03.09.2026)
+
+Тот же механизм, что на сервере 1 (`C:\frps\run-frps.bat`, задачи `frps` +
+`frps-watchdog`), воспроизведён с нуля:
+
+- `C:\frps\run-frps.bat` — идемпотентный (`tasklist` на живой `frps.exe`,
+  запускает только если его нет);
+- задача `frps`: триггеры «при старте системы» + каждые 5 минут,
+  `ExecutionTimeLimit PT0S` (без лимита), `MultipleInstances IgnoreNew`,
+  `RestartOnFailure` 1 минута × 3, от `SYSTEM`;
+- задача `frps-watchdog`: каждые 5 минут (сдвиг +2 мин от задачи `frps`),
+  `ExecutionTimeLimit PT5M`, от `SYSTEM`; ничего не делает, пока `frps.exe`
+  жив, иначе останавливает задачу `frps` (если она ещё `Running`) и поднимает
+  заново через `schtasks /run /tn frps`.
+- Проверено принудительным `taskkill /F /IM frps.exe`: новый процесс поднялся
+  через ~1 минуту (15:22:54 → 15:24:03 в тесте 03.09.2026), ровно один
+  экземпляр, все порты снова слушаются.
+
+### Firewall (verified 03.09.2026)
+
+72 → 73 включённых входящих allow-правил после последнего добавления (69 → 72
+после первого набора из трёх правил, ещё +1 за 443). Правила:
+
+- `iprsv1-18-cmsv6-tcp` — TCP **80, 2121-2162, 6601-6612, 6617, 6630-6635**
+- `iprsv1-18-cmsv6-udp` — UDP **6601-6612**
+- `iprsv1-18-frps-tcp` — TCP **7000, 9966, 9967, 20021**
+- `iprsv1-18-443-tcp` — TCP **443**
+- `OpenSSH Server (sshd)` — TCP 22 (создано человеком в рамках шага 0)
+
+Все — `-Profile Any -RemoteAddress Any -Program Any -Action Allow`. Порт 7500
+(дашборд frps) не открыт и не должен быть.
+
+🔴 **Отклонение от спеки, согласованное с Максимом в чате задачи 03.09.2026:**
+спека прямо запрещала открывать 443 («домен, nginx, TLS — вне задачи»); порт
+20021 в спеке тоже не упоминался. Максим явно попросил открыть оба порта для
+паритета с сервером 1 (там они часть правила `GPS services TCP 2` /
+`GPS services TCP`) — сделано по его прямому запросу в чате, а не по своей
+инициативе. **На 03.09.2026 за 443 ничего не слушает** — `nginx` на этом
+сервере не установлен, TLS не настроен; порт открыт заранее, функционально
+пока не используется.
+
+### Отличия от сервера 1
+
+- Нет домена, нет `nginx`, нет TLS, нет `win-acme`/сертификатов — сознательно
+  вне этой задачи (см. 🔴 выше — 443 открыт заранее, но не занят).
+- Собственный, отдельный `token` frps (не боевой).
+- Служба `gpstomcat6` в этой сборке `Manual`, а не `Automatic` (не менялось
+  специально, так поставил мастер).
+- **В процессе (03.09.2026, тем же вечером):** Максим попросил добавить
+  домен `scan-vision.ru`, `nginx` и TLS через `certbot`/Let's Encrypt «по
+  аналогии с сервером 1» — но сервер 1 фактически использует `win-acme` +
+  сертификат GlobalSign, не `certbot`/Let's Encrypt, так что «по аналогии»
+  здесь требует отдельного решения, а не копирования. Отправлено на
+  доработку спеки (`/arch`) отдельной задачей — сюда, в раздел про сервер 2,
+  допишется after того, как будет сделано.
+
+### Как перевести регистратор на этот сервер
+
+В `frpc.ini`/`frpcSet.xml` на самом регистраторе поменять **оба** значения —
+`<ServerIp>` на `200.165.238.242` и `<TokenForCon>` на новый токен этого
+сервера (взять с самой машины, `C:\frps\frps.ini`, не отсюда — здесь его нет
+и не будет). Один `<ServerIp>` без токена не подключится: у серверов разные
+токены.
