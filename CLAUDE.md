@@ -120,7 +120,7 @@ Verified 31.08.2026 unless noted.
 
 | Task | Action | Notes |
 |---|---|---|
-| `nginx_run` | `C:\nginx\run_nginx.bat` | at startup, SYSTEM. The `.bat` is idempotent — it checks `tasklist` for a running `nginx.exe` and only then `cd /d C:\nginx` + `start "" nginx.exe`, so it cannot raise a second master. |
+| `nginx_run` | `C:\nginx\run_nginx.bat` | 🔴 **`Disabled` since 07.09.2026 (IPRSV1-19)** — was: at startup, SYSTEM. The `.bat` is idempotent — it checks `tasklist` for a running `nginx.exe` and only then `cd /d C:\nginx` + `start "" nginx.exe`, so it cannot raise a second master. See "nginx" below for why and for the re-enable procedure. |
 | `frps` | `C:\frps\run-frps.bat` | at startup + every 5 min (repeats forever), SYSTEM. The `.bat` is idempotent (`tasklist` check, same pattern as `nginx_run`'s), the task has no `ExecutionTimeLimit`, `MultipleInstances IgnoreNew`, and restarts on failure (1 min × 3). See "frps" section below for the 17.08.2026 outage and how it's watched now. |
 | `frps-watchdog` | `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\frps\frps-watchdog.ps1` | every 5 min (offset from `frps`'s own trigger), SYSTEM, `ExecutionTimeLimit PT5M`. No-op when `frps.exe` is alive; otherwise unconditionally re-triggers `frps` (`Stop-ScheduledTask` first, only if the `frps` task's own state is still `Running`). See "frps" section below. |
 | `win-acme renew (…)` | `C:\wacs\wacs.exe` | vendor task, renews `test.thedevs.ru` only. |
@@ -128,6 +128,10 @@ Verified 31.08.2026 unless noted.
 A second, duplicate `nginx` task existed briefly on 14.08.2026 (with its own
 `run-nginx.bat`) and was **deleted** — two startup triggers would have raced
 for port 443. Do not recreate it; `nginx_run` is the only one.
+
+🔴 **`nginx_run` disabled 07.09.2026 (IPRSV1-19)** on both project machines
+(Максим, task chat: «давай руби на обе») — full reason, consequence and the
+reverse-enable procedure are under "nginx" below, not repeated here.
 
 ### Firewall (inbound, enabled)
 
@@ -257,18 +261,21 @@ already-open range as an accepted, not a new, exposure.
 
 ## Web entry points (80 / 443)
 
-Both work from the internet (verified 31.08.2026):
+🔴 **443 is down since 07.09.2026 (IPRSV1-19) — nginx was disabled on
+purpose, see "nginx" below.** Port 80 is unaffected:
 
 | URL | Result | Served by |
 |---|---|---|
 | `http://scanvision.online/` | 200 | CMSV6 tomcat directly on port 80 |
-| `https://scanvision.online/` | 200, valid chain | nginx 443 → `127.0.0.1:80` |
+| `https://scanvision.online/` | no response (connection times out) since 07.09.2026 | was nginx 443 → `127.0.0.1:80`; nginx is now stopped and its autostart disabled |
 
-**HTTPS from outside now works.** The "Known limitation: HTTPS (443) not
-reachable from outside" that dominated this file until 04.08.2026 is
-**resolved** — a full TLS handshake plus a 200 response from an external RU
-vantage point took 0.59 s on 31.08.2026. Keep this in mind when reading old
-specs in `specs/`: their 443 caveats are historical.
+**HTTPS from outside no longer works — deliberately, not a regression.** The
+paragraph that used to stand here ("HTTPS from outside now works", verified
+31.08.2026, 0.59 s full handshake + 200 from an external RU vantage point)
+described a real, working state at the time — it stopped being true
+07.09.2026 when IPRSV1-19 disabled nginx. Historical specs in `specs/` that
+assume working 443 (everything before 07.09.2026) describe that earlier
+state, not the current one.
 
 ### CMSV6 tomcat on port 80
 
@@ -296,6 +303,70 @@ service `PathName` first). It is:
   point.
 
 ### nginx
+
+🔴 **Disabled 07.09.2026 (IPRSV1-19) — nginx is not running on this
+machine.** Task text, verbatim: «nginx работает некорректно совместно с
+программой, установленной на этом сервере. Нужно: остановить службу nginx и
+отключить её автозапуск. Не удалять nginx полностью — только выключить, чтобы
+можно было включить обратно при необходимости.» Which program and what the
+conflict is was never named and left no trace on this machine (checked:
+installed software since 25.08.2026 — only Google Chrome/Edge —, and
+`C:\nginx\logs\error.log`, last entries 31.08.2026, nothing about ports or
+conflicts) — not diagnosed or guessed here. Asked which of the two project
+machines, Максим answered in the task chat 07.09.2026: «давай руби на обе» —
+applied to **both** (this machine and server 2, `200.165.238.242`, see its
+own `### nginx` below).
+
+There is no `nginx` **service** on this machine (`Get-Service` returns
+nothing) — nginx has always started via the `nginx_run` **scheduled task**
+below, not a service, so "stop the service" from the task text is
+`Disable-ScheduledTask` + killing the live process, not `Stop-Service`.
+Mechanism actually applied:
+
+```powershell
+Disable-ScheduledTask -TaskName nginx_run
+```
+```cmd
+taskkill /F /IM nginx.exe
+```
+
+`taskkill`, not `nginx.exe -s stop`/`-s reload` — the master runs as `SYSTEM`,
+an interactive SSH session is `Administrator`, so signal commands fail with
+`OpenEvent(...) failed (5: Access is denied)` (same gotcha as "Reload gotcha"
+below). Verified after: `Get-Process nginx` empty, `Get-NetTCPConnection
+-State Listen` no longer shows 443/16604/16605, port 80 unaffected (same
+tomcat PID as before). Re-checked a few minutes later: **no new listener took
+over 443/16604/16605** — nothing else on the machine claimed them. The
+firewall rules `nginx 443`, `nginx 80`, `GPSNginx` were **not** touched or
+removed — ports stay open, there is simply nothing listening behind them now.
+
+**Consequence, accepted deliberately (task asked for exactly this):** the
+whole 443 entry point and the two IPRSV1-17 media-under-HTTPS listeners
+(16604 `GPSMediaSvr`, 16605 `GPSLoginSvr`) are down — see "Web entry points"
+above. Port 80 (`http://scanvision.online/`, `http://201.34.132.26/`) keeps
+working, served directly by CMSV6 tomcat, which nginx never occupied.
+
+**Reverse-enable procedure (the task explicitly requires this to stay
+possible):**
+
+```powershell
+Enable-ScheduledTask -TaskName nginx_run
+schtasks /run /tn nginx_run
+```
+
+Then verify `Get-Process nginx` shows a fresh master+worker pair and
+`Get-NetTCPConnection -State Listen` shows 443/16604/16605 again, and check
+`https://scanvision.online/` from outside. Watch for the two existing
+gotchas while doing this: the **stale-master gotcha** below (a detached
+master can survive a stop/start cycle and keep serving in parallel with the
+fresh one — check `StartTime`/PIDs after restarting), and the **reload
+gotcha** below (`-s reload`/`-s stop` from an interactive `Administrator`
+session fails; only `taskkill` + `schtasks /run /tn nginx_run` works, same as
+above).
+
+Everything below in this section (config, certs, gotchas) describes the
+config **as it sits on disk** — nothing in `C:\nginx` was touched by
+IPRSV1-19, only the task and the process:
 
 `C:\nginx\conf\nginx.conf` (verified 31.08.2026) has **four** `server`
 blocks: two `listen 443 ssl` (both `proxy_pass http://127.0.0.1:80`), plus
@@ -385,6 +456,14 @@ IPRSV1-17 media-proxy blocks below) for websocket upgrade.
   -eq 443` shows only the new PIDs.
 
 ### Certificates
+
+🔴 **Since 07.09.2026 (IPRSV1-19) nginx is disabled, so nothing on this
+machine serves these certificates** — both stay on disk untouched and keep
+renewing on schedule (win-acme for `test.thedevs.ru`, still an enabled
+task), there's just no listener to hand them to a browser. Same paths as
+before: Let's Encrypt storage is `C:\nginx\conf\le`, and its win-acme
+validation is the file webroot `C:\nginx\html` — plain paths on disk,
+unaffected by nginx being stopped.
 
 - **Purchased GlobalSign** — in use on 443 for `scanvision.online`. Verified
   from outside 31.08.2026: issuer `GlobalSign GCC R46 DV TLS CA 2025`, leaf
@@ -1053,6 +1132,67 @@ IPRSV1-18 (вторая спека, 03.09.2026) доведён до состоя
 
 ### nginx (verified 03.09.2026, IPRSV1-18 вторая спека)
 
+🔴 **Отключён 07.09.2026 (IPRSV1-19) — nginx на этой машине не запущен.**
+Текст задачи, дословно: «nginx работает некорректно совместно с программой,
+установленной на этом сервере. Нужно: остановить службу nginx и отключить её
+автозапуск. Не удалять nginx полностью — только выключить, чтобы можно было
+включить обратно при необходимости.» Какая именно программа конфликтует и в
+чём конфликт — в задаче не названо, следов на этой машине нет (проверено:
+установленное ПО с 25.08.2026 — Zabbix Agent, QEMU guest agent, CMSV6
+7.36.1, MDVRPlayer, MSVC-рантаймы, Edge —, `error.log` от 03.09.2026,
+штатные записи об установке) — причина не диагностировалась и не
+выдумывалась. На вопрос, какую из двух машин проекта менять, Максим ответил
+в чате задачи 07.09.2026: «давай руби на обе» — применено к **обеим**
+(эта машина и сервер 1, `201.34.132.26`, см. его `### nginx` выше).
+
+Службы `nginx` на этой машине нет (`Get-Service` — пусто), запуск шёл только
+через задачу планировщика `nginx_run` ниже, поэтому «остановить службу»
+реализовано как `Disable-ScheduledTask` + снятие живого процесса:
+
+```powershell
+Disable-ScheduledTask -TaskName nginx_run
+```
+```cmd
+taskkill /F /IM nginx.exe
+```
+
+`taskkill`, а не `nginx.exe -s stop`/`-s reload` — мастер запущен от
+`SYSTEM`, SSH-сессия от `Administrator`, сигнальные команды падают с
+`OpenEvent(...) failed (5: Access is denied)` (та же ловушка, что в
+«Reload gotcha» ниже). Проверено после: `Get-Process nginx` — пусто,
+`Get-NetTCPConnection -State Listen` больше не показывает 443/16604/16605,
+порт 80 не тронут (тот же PID tomcat, что и до правки). Перепроверено через
+несколько минут: **новый слушатель на 443/16604/16605 не появился** — порты
+свободны, никто их не занял. Правила файрвола (`iprsv1-18-443-tcp`,
+`iprsv1-18-parity-tcp`) не тронуты и не удалены — порты остаются открытыми,
+просто за ними больше никто не слушает.
+
+**Последствие, принятое сознательно (это и требовала задача):** HTTPS-точка
+входа на 443 и оба медиа-листенера IPRSV1-17 (16604 `GPSMediaSvr`, 16605
+`GPSLoginSvr`) не работают. Порт 80 (`http://scan-vision.ru/`,
+`http://200.165.238.242/`) продолжает работать напрямую через tomcat CMSV6 —
+nginx его никогда не занимал.
+
+**Процедура обратного включения (задача прямо требует сохранить эту
+возможность):**
+
+```powershell
+Enable-ScheduledTask -TaskName nginx_run
+schtasks /run /tn nginx_run
+```
+
+Затем проверить, что `Get-Process nginx` возвращает свежую пару
+мастер+воркер, `Get-NetTCPConnection -State Listen` снова показывает
+443/16604/16605, и снаружи `https://scan-vision.ru/`. При этом помнить про
+две существующие ловушки ниже: залипший мастер может пережить цикл
+стоп/старт и продолжать слушать параллельно с новым (проверять
+`StartTime`/PID), а `-s reload`/`-s stop` от `Administrator` не работает —
+только `taskkill` + `schtasks /run /tn nginx_run`, как выше.
+
+Всё, что описано ниже в этом разделе (конфиг, сертификат, ловушки),
+описывает состояние **на диске** — IPRSV1-19 не трогала ничего в `C:\nginx`,
+только задачу планировщика и живой процесс:
+
 `C:\nginx` — nginx `1.30.4` (та же версия, что на сервере 1), скачан и
 распакован заново (не скопирован с сервера 1). Слушает **443, 16604, 16605**
 (порт 80 остаётся у CMSV6 — точку входа на nginx не переносили, это уже
@@ -1085,6 +1225,18 @@ tomcat, см. win-acme ниже), нет HSTS, нет редиректа 80→44
   свежие PID.
 
 ### win-acme и сертификат (verified 03.09.2026, IPRSV1-18 вторая спека)
+
+🔴 **С 07.09.2026 (IPRSV1-19) nginx на этой машине выключен** — сертификат и
+ключ остаются на диске нетронутыми и продолжают продлеваться по расписанию
+(задача `win-acme renew (...)` не менялась и не отключалась), просто их
+некому отдавать браузеру. Отдельная ловушка: у продления `scan-vision.ru`
+установочный шаг после выпуска — `C:\nginx\reload-nginx.bat`
+(`nginx.exe -s reload`); при выключенном nginx этот шаг ничего не поднимет
+и просто ничего не сделает (тот же `Access is denied`/no-op, что и раньше от
+`Administrator`, только теперь и штатный запуск от `SYSTEM` не найдёт живой
+процесс, чтобы ему сигналить). Валидацию это не портит — она файловая,
+webroot `C:\Program Files\CMSServerV6\tomcat\webapps\gpsweb`, отдаёт tomcat
+на порту 80 независимо от состояния nginx.
 
 `C:\wacs` — win-acme `2.2.9.1701` (pluggable, та же версия, что на сервере
 1), скачан заново из официального релиза, не скопирован. Валидация —
@@ -1130,6 +1282,11 @@ docBase="../webapps/gpsweb" path=""` в `server.xml`; `appBase="ttxapps"` из
   не повод откатывать задачу.
 
 ### Автозапуск (verified 03.09.2026)
+
+🔴 **Задача `nginx_run` переведена в `Disabled` 07.09.2026 (IPRSV1-19)** —
+причина (конфликт с неназванной программой) и полная процедура обратного
+включения описаны в `### nginx` выше; здесь она не повторяется. `frps`/
+`frps-watchdog` ниже этой правкой не затронуты.
 
 Тот же механизм, что на сервере 1 (`C:\frps\run-frps.bat`, задачи `frps` +
 `frps-watchdog`), воспроизведён с нуля:
