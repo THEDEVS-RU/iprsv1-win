@@ -1,8 +1,9 @@
 # iprsv1-win
 
 Operations documentation for the **IPRSV1** project server — a Windows Server
-2022 VDS running the CMSV6 GPS/video platform behind nginx, plus an `frps`
-reverse proxy used to reach in-vehicle recorders.
+2022 VDS running the CMSV6 GPS/video platform, plus an `frps` reverse proxy
+used to reach in-vehicle recorders. An `nginx` TLS front-end is installed but
+disabled since 07.09.2026 (IPRSV1-19) — see `CLAUDE.md`.
 
 There is no application code here. The repository holds:
 
