@@ -11,8 +11,10 @@ token/dashboard password** — see "Сервер 2" → frps.ini for the price o
 (paired rotation). No other shared configuration.
 
 Windows Server 2022 host (`VDSWIN2K22`, Timeweb VDS) for the IPRSV1 project.
-Runs the CMSV6 GPS/video platform, an `nginx` TLS front-end and an `frps`
-(fatedier/frp) reverse-proxy server used to reach in-vehicle recorders.
+Runs the CMSV6 GPS/video platform and an `frps` (fatedier/frp) reverse-proxy
+server used to reach in-vehicle recorders. `nginx` is installed but
+**disabled since 07.09.2026 (IPRSV1-19)** — see "nginx" below; it is no
+longer the TLS front-end for anything on this machine.
 
 **Everything below marked "verified DD.MM.YYYY" was measured on the machine or
 from outside on that date.** Facts without such a mark come from earlier work
@@ -99,8 +101,9 @@ Verified 31.08.2026 unless noted.
   6630–6635, 9999. Do not stop/restart these services, touch their files, or
   change the `CMSv6-*`/`GPS *` firewall rules — the one documented exception
   is `gpstomcat6`, restarted to apply a `server.xml` port change.
-- **nginx** — `C:\nginx` (nginx 1.30.4). Listens on **443 only**. See
-  "Web entry points" below.
+- **nginx** — `C:\nginx` (nginx 1.30.4). 🔴 **Disabled 07.09.2026
+  (IPRSV1-19)** — was listening on **443 only**, now not running at all. See
+  "nginx" under "Web entry points" below.
 - **frps** — reverse-proxy server, now at **`C:\frps`** (moved off
   `C:\Users\Administrator\Desktop\6e9`, which no longer exists). Version
   **0.17.0**. See "frps" below. ✅ **Up, self-healing, dashboard closed, as of
@@ -1342,8 +1345,11 @@ verified 03.09.2026): TCP и UDP **9000-64999** — совпадает с сер
 История: `iprsv1-18-443-tcp` и порт `20021` в правиле `iprsv1-18-frps-tcp`
 были открыты ещё 03.09.2026, до этой задачи и до того, как за 443 появился
 слушатель — по прямому запросу Максима в чате, вопреки первой спеке, которая
-443 прямо запрещала (nginx/TLS были тогда вне задачи). Это отклонение с тех
-пор реализовано: 443 теперь занят nginx.
+443 прямо запрещала (nginx/TLS были тогда вне задачи). Это отклонение было
+реализовано: 443 был занят nginx с 03.09.2026 по 07.09.2026. 🔴 **С
+07.09.2026 (IPRSV1-19) nginx на этой машине отключён** — правило
+`iprsv1-18-443-tcp` держит порт открытым вхолостую, слушателя за ним больше
+нет (см. "nginx" выше).
 
 **`iprsv1-18-open-all` (03.09.2026, IPRSV1-18, третья спека): открыты все
 порты, по прямой просьбе Максима.** Дословно в чате задачи: «нужно открыть
